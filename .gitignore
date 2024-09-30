@@ -1,0 +1,5 @@
+# Ignore Python files with the prefix SMARTGEN and other specified file types
+SMARTGEN-*.py
+*.json
+*.png
+*.jpg

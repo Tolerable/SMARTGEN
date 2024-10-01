@@ -45,10 +45,14 @@ class AIImageChatApp:
 
         # Add right-click context menu
         self.image_menu = tk.Menu(self.master, tearoff=0)
-        self.image_menu.add_command(label="COPY", command=self.copy_image_to_clipboard)
+        self.image_menu.add_command(label="Copy Image", command=self.copy_image_to_clipboard)
+        self.image_menu.add_command(label="Copy All Images", command=self.copy_all_images_to_clipboard)
 
-        # Initialize image_label as None
+        # Initialize image_label and combined_image as None
         self.image_label = None
+        self.combined_image = None
+        self.current_image_path = None
+        self.is_single_image = True
 
     def send_message(self, event=None):
         user_input = self.input_area.get("1.0", tk.END).strip()
@@ -157,6 +161,9 @@ class AIImageChatApp:
         frame_height = self.image_grid_frame.winfo_height()
         thumbnail_size = (frame_width // 2, frame_height // 2)
 
+        # Create a new image to combine all four images
+        self.combined_image = Image.new('RGB', (frame_width, frame_height))
+
         for i, (image_url, image_path) in enumerate(image_list):
             img = Image.open(image_path)
             thumbnail = img.resize(thumbnail_size, Image.LANCZOS)
@@ -171,7 +178,10 @@ class AIImageChatApp:
             thumbnail_label.image_path = image_path
             thumbnail_label.grid(row=row, column=col, sticky="nsew")
             thumbnail_label.bind("<Button-1>", lambda e, lbl=thumbnail_label: self.toggle_image_size(e, lbl))
-            thumbnail_label.bind("<Button-3>", lambda e, path=image_path: self.show_image_context_menu(e, path))
+            thumbnail_label.bind("<Button-3>", self.show_image_context_menu)
+
+            # Paste the thumbnail into the combined image
+            self.combined_image.paste(thumbnail, (col * thumbnail_size[0], row * thumbnail_size[1]))
 
         self.image_grid_frame.grid_columnconfigure(0, weight=1)
         self.image_grid_frame.grid_columnconfigure(1, weight=1)
@@ -179,35 +189,65 @@ class AIImageChatApp:
         self.image_grid_frame.grid_rowconfigure(1, weight=1)
 
         self.image_grid_frame.showing_full_image = False
+        self.is_single_image = False
+        logging.info("Multiple images displayed successfully")
 
-    def show_image_context_menu(self, event, img_path):
-        """Shows the right-click context menu on the image frame and stores the image path to be copied."""
-        self.current_image_to_copy = img_path
+    def show_image_context_menu(self, event):
         try:
+            # Determine which image was clicked
+            clicked_widget = event.widget
+            if self.is_single_image:
+                self.current_image_path = self.current_image_path
+            elif hasattr(clicked_widget, 'image_path'):
+                self.current_image_path = clicked_widget.image_path
+            else:
+                return  # If we can't determine the image, don't show the menu
+
+            # Update menu items based on the current state
+            self.image_menu.delete(0, tk.END)
+            self.image_menu.add_command(label="Copy Image", command=self.copy_image_to_clipboard)
+            if not self.is_single_image:
+                self.image_menu.add_command(label="Copy All Images", command=self.copy_all_images_to_clipboard)
+
             self.image_menu.tk_popup(event.x_root, event.y_root)
         finally:
             self.image_menu.grab_release()
 
+    def copy_single_image_to_clipboard(self):
+        if self.image_grid_frame.showing_full_image and self.image_label:
+            self.copy_image_to_clipboard(self.image_label.image_path)
+        elif hasattr(self, 'current_image_list') and self.current_image_list:
+            # If in grid view, copy the clicked image
+            clicked_widget = self.image_grid_frame.winfo_containing(self.master.winfo_pointerx() - self.master.winfo_rootx(),
+                                                                    self.master.winfo_pointery() - self.master.winfo_rooty())
+            if isinstance(clicked_widget, tk.Label) and hasattr(clicked_widget, 'image_path'):
+                self.copy_image_to_clipboard(clicked_widget.image_path)
+
     def copy_image_to_clipboard(self):
-        """Copies the right-clicked image to the clipboard."""
-        if hasattr(self, 'current_image_to_copy'):
-            try:
-                image = Image.open(self.current_image_to_copy)
-                output = io.BytesIO()
-                image.convert('RGB').save(output, 'BMP')
-                data = output.getvalue()[14:]  # Remove the BMP header for clipboard
-                output.close()
+        if self.current_image_path:
+            self._copy_image_to_clipboard(self.current_image_path)
 
-                win32clipboard.OpenClipboard()
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
-                win32clipboard.CloseClipboard()
-                logging.info("Image copied to clipboard successfully")
-            except Exception as e:
-                logging.error(f"Error copying image to clipboard: {str(e)}")
-        else:
-            logging.info("No image available to copy")
+    def copy_all_images_to_clipboard(self):
+        if self.combined_image:
+            self._copy_image_to_clipboard(self.combined_image)
 
+    def _copy_image_to_clipboard(self, image):
+        try:
+            if isinstance(image, str):  # If it's a file path
+                image = Image.open(image)
+            output = io.BytesIO()
+            image.convert('RGB').save(output, 'BMP')
+            data = output.getvalue()[14:]  # Remove the BMP header for clipboard
+            output.close()
+
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+            win32clipboard.CloseClipboard()
+            logging.info("Image copied to clipboard successfully")
+        except Exception as e:
+            logging.error(f"Error copying image to clipboard: {str(e)}")
+            
     def toggle_image_size(self, event, label):
         """Toggles between 2x2 grid and full-sized image."""
         if not hasattr(self, 'current_image_list'):
@@ -252,14 +292,15 @@ class AIImageChatApp:
             self.current_image_path = self.save_image(image_url)
 
             # Bind the right-click event to the new label
-            self.image_label.bind("<Button-3>", lambda e: self.show_image_context_menu(e, self.current_image_path))
+            self.image_label.bind("<Button-3>", self.show_image_context_menu)
 
             # Reset the showing_full_image flag and clear current_image_list
             self.image_grid_frame.showing_full_image = False
             if hasattr(self, 'current_image_list'):
                 del self.current_image_list
 
-            logging.info("Image displayed successfully")
+            self.is_single_image = True
+            logging.info("Single image displayed successfully")
 
         except Exception as e:
             logging.error(f"Error displaying image: {str(e)}")

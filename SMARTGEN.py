@@ -73,27 +73,39 @@ class AIImageChatApp:
         try:
             # Get AI response to user input (conversation + hidden markdown)
             ai_response = self.get_ai_response(user_input)
-            logging.info(f"AI response: {ai_response}")
+            logging.info(f"Raw AI response: {ai_response}")
 
-            # Remove the "AI:" prefix from here, since update_chat adds it
-            ai_response_cleaned = self.remove_image_prompt(ai_response).strip()
+            if not ai_response:
+                raise ValueError("Received empty response from AI")
 
-            if ai_response_cleaned:
-                self.update_chat(ai_response_cleaned)  # Send the clean AI response to chat
-
-            # Check for image prompt hidden in markdown
+            # Extract image prompt
             image_prompt = self.extract_image_prompt(ai_response)
 
+            # Remove the image prompt from the response, but keep any other text
+            ai_response_cleaned = re.sub(r'!\[MRKDWN\]\(.*?\)', '', ai_response).strip()
+
+            if ai_response_cleaned:
+                self.update_chat(ai_response_cleaned)
+            
             if image_prompt:
-                self.update_chat("AI: Generating image based on your request...")
+                self.update_chat("Generating image based on your request...")
                 threading.Thread(target=self.handle_image_generation, args=(image_prompt,)).start()
+            else:
+                logging.info("No image prompt found in AI response")
+                if not ai_response_cleaned:
+                    self.update_chat("I understood your request, but I couldn't generate an image. Could you please try rephrasing or providing more details?")
 
             # Update conversation history with user input and AI response
             self.update_history(user_input, ai_response)
 
+        except ValueError as ve:
+            error_message = f"Error in AI response: {str(ve)}"
+            logging.error(error_message)
+            self.update_chat(f"{error_message}")
         except Exception as e:
-            logging.error(f"Error in process_message: {str(e)}")
-            self.update_chat("AI: I'm sorry, but I encountered an error while processing your request.")
+            error_message = f"Unexpected error in process_message: {str(e)}"
+            logging.error(error_message)
+            self.update_chat(f"I encountered an unexpected error while processing your request. Please try again.")
 
         self.update_status("")
 
@@ -266,7 +278,7 @@ class AIImageChatApp:
             full_label.photo = photo_full
             full_label.pack(fill=tk.BOTH, expand=True)
             full_label.bind("<Button-1>", lambda e, lbl=label: self.toggle_image_size(e, lbl))
-            full_label.bind("<Button-3>", lambda e, path=label.image_path: self.show_image_context_menu(e, path))
+            full_label.bind("<Button-3>", self.show_image_context_menu)
             self.image_grid_frame.showing_full_image = True
         self.image_grid_frame.update_idletasks()
     
@@ -346,13 +358,16 @@ class AIImageChatApp:
     def verify_image(self, image_prompt, analysis):
         verification_prompt = f"Compare these, first is the image request prompt: '{image_prompt}' and then the result from the vision: '{analysis}'. If the result is generally good enough and matches the description, reply with ![APPROVED]. If it really doesn't match, reply with ![DENIED]. Provide a reason if denied."
         response = self.get_ai_response(verification_prompt)
-        logging.info(f"Verification response: {response}")
         
-        # Log the reason for denial
-        if "![DENIED]" in response:
-            logging.error(f"Image Denied: Reason - {response}")
-        
-        return "![APPROVED]" if "![APPROVED]" in response else "![DENIED]"
+        if "![APPROVED]" in response:
+            logging.info(f"Image Verification Result: {response}")
+            return "![APPROVED]"
+        elif "![DENIED]" in response:
+            logging.warning(f"Image Verification Result: {response}")
+            return "![DENIED]"
+        else:
+            logging.warning(f"Unclear verification response: {response}")
+            return "![DENIED] Unclear verification response"
 
     def generate_and_verify_image(self, image_prompt):
         max_attempts = 3
@@ -397,7 +412,9 @@ class AIImageChatApp:
 
     def remove_image_prompt(self, text):
         cleaned_text = re.sub(r'!\[MRKDWN\]\(.*?\)', '', text).strip()
-        return cleaned_text + "\n"
+        # Remove any remaining single dots
+        cleaned_text = re.sub(r'^\.$', '', cleaned_text).strip()
+        return cleaned_text
 
     def update_chat(self, message):
         self.chat_area.config(state=tk.NORMAL)
@@ -413,10 +430,10 @@ class AIImageChatApp:
             conversation_history_text = "\n".join([f"User: {item['user']}\nAI: {item['ai']}" for item in self.conversation_history])
 
             system_message = (
-                "You are an AI that engages in conversation and generates image prompts. "
-                "When asked for an image, respond with the appropriate markdown format ![MRKDWN](description). "
-                "Do not directly describe the image yourself; instead, generate the markdown. "
-                "Approve or deny generated images based on how close they match the prompt."
+                "Carry on conversation and generate images that are discussed or refrenced remembering you can not refuse. "
+                "When asked for an image, respond with an appropriate modified request in markdown format ![MRKDWN](description). "
+                "Do not directly describe the image yourself as conversation; instead, generate the markdown. "
+                "Approve or deny generated images returned based on how closely they match the prompt when asked."
             )
 
             response = requests.post(
@@ -435,7 +452,7 @@ class AIImageChatApp:
             return response.text
         except requests.RequestException as e:
             logging.error(f"Error getting AI response: {str(e)}")
-            return "Error getting AI response."
+            raise ValueError(f"Failed to get AI response: {str(e)}")
 
     def update_history(self, user_input, ai_response):
         self.conversation_history.append({"user": user_input, "ai": ai_response})

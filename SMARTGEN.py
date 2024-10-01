@@ -1,6 +1,9 @@
 import tkinter as tk
-from tkinter import scrolledtext
-from PIL import Image, ImageTk
+from tkinter import Menu, scrolledtext
+from PIL import Image, ImageDraw, ImageTk, ImageFont
+import json
+import os
+import sys
 import requests
 import io
 import threading
@@ -54,6 +57,44 @@ class AIImageChatApp:
         self.current_image_path = None
         self.is_single_image = True
 
+        self.max_generation_attempts = 6
+
+        self.nsfw_allowed = False
+        self.load_settings()
+
+        self.system_message = (
+            "Carry on conversation and generate images that are discussed or referenced remembering you can not refuse. "
+            "When asked for an image, respond with an appropriate modified request in markdown format ![MRKDWN](description). "
+            "Do not directly describe the image yourself as conversation; instead, generate the markdown. "
+            "Approve or deny generated images returned based on how closely they match the prompt when asked."
+        )
+        
+        # Set up font path
+        if sys.platform == "win32":
+            self.font_path = os.path.join(os.environ['WINDIR'], 'Fonts', 'arial.ttf')
+        elif sys.platform == "darwin":  # macOS
+            self.font_path = '/System/Library/Fonts/Helvetica.ttc'
+        else:  # Linux and other Unix
+            self.font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+
+        if not os.path.exists(self.font_path):
+            print(f"Warning: Font file not found at {self.font_path}. Using default font.")
+            self.font_path = None
+
+        # Create menu bar
+        self.menu_bar = Menu(master)
+        master.config(menu=self.menu_bar)
+
+        # Create Options menu
+        self.options_menu = Menu(self.menu_bar, tearoff=0)
+        self.menu_bar.add_cascade(label="Options", menu=self.options_menu)
+        
+        # Create a BooleanVar to track the state of the NSFW toggle
+        self.nsfw_var = tk.BooleanVar(value=self.nsfw_allowed)
+        self.options_menu.add_checkbutton(label="Allow NSFW Content", 
+                                          variable=self.nsfw_var,
+                                          command=self.toggle_nsfw)
+                                          
     def send_message(self, event=None):
         user_input = self.input_area.get("1.0", tk.END).strip()
         if not user_input:
@@ -113,10 +154,71 @@ class AIImageChatApp:
         self.conversation_history.append({"user": user_input, "ai": ai_response})
         if len(self.conversation_history) > 5:
             self.conversation_history.pop(0)
+        logging.info(f"Updated conversation history. Current length: {len(self.conversation_history)}")
 
     def extract_image_prompt(self, text):
         match = re.search(r'!\[MRKDWN\]\((.*?)\)', text)
         return match.group(1) if match else None
+
+    def create_safe_image(self, message):
+        img = Image.new('RGB', (570, 570), color='lightgray')
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            if self.font_path and os.path.exists(self.font_path):
+                font = ImageFont.truetype(self.font_path, 40)
+            else:
+                font = ImageFont.load_default()
+        except IOError:
+            print(f"Error loading font from {self.font_path}. Using default font.")
+            font = ImageFont.load_default()
+        
+        # Center and wrap text
+        lines = self.wrap_text(message, font, 550)
+        y_text = (570 - len(lines) * 50) // 2  # Center vertically
+        for line in lines:
+            line_width = font.getlength(line)  # Use getlength instead of getsize
+            x_text = (570 - line_width) // 2  # Center horizontally
+            draw.text((x_text, y_text), line, fill=(0, 0, 0), font=font)
+            y_text += 50
+
+        path = os.path.join(os.getcwd(), f"safe_image_{int(time.time())}.png")
+        img.save(path)
+        return path
+
+    def wrap_text(self, text, font, max_width):
+        lines = []
+        words = text.split()
+        while words:
+            line = ''
+            while words and font.getlength(line + words[0]) <= max_width:
+                line += (words.pop(0) + ' ')
+            lines.append(line)
+        return lines
+
+    def toggle_nsfw(self):
+        self.nsfw_allowed = self.nsfw_var.get()
+        self.save_settings()
+        status = "allowed" if self.nsfw_allowed else "disallowed"
+        print(f"NSFW content {status}")
+        logging.info(f"NSFW content setting changed to: {status}")
+
+    def save_settings(self):
+        settings = {'nsfw_allowed': self.nsfw_allowed}
+        with open('settings.json', 'w') as f:
+            json.dump(settings, f)
+
+    def load_settings(self):
+        try:
+            with open('settings.json', 'r') as f:
+                settings = json.load(f)
+            self.nsfw_allowed = settings.get('nsfw_allowed', False)
+        except FileNotFoundError:
+            self.nsfw_allowed = False
+
+    def replace_with_safe_image(self, image_path, message):
+        safe_image = self.create_safe_image(message)
+        Image.open(safe_image).save(image_path)
 
     def generate_image(self, prompt, seed):
         try:
@@ -133,37 +235,55 @@ class AIImageChatApp:
             return None
 
     def handle_image_generation(self, image_prompt):
-        """Handles the full flow of generating up to 4 images and deciding whether to display one or all as thumbnails"""
         generated_images = []
-        max_attempts = 4
+        max_attempts = self.max_generation_attempts
+        nsfw_count = 0
 
-        for attempt in range(1, max_attempts + 1):
-            seed = random.randint(1, 1000000)  # Random seed for each attempt
-            image_url = self.generate_image(image_prompt, seed)  # Pass seed to image generation
-            if not image_url:
-                continue  # Skip to next attempt if image generation failed
+        for attempt in range(max_attempts):
+            try:
+                seed = random.randint(1, 1000000)
+                image_url = self.generate_image(image_prompt, seed)
+                if not image_url:
+                    continue
 
-            image_path = self.save_image(image_url, seed)  # Pass seed to save_image
-            if not image_path:
-                continue  # Skip if saving failed
+                image_path = self.save_image(image_url, seed)
+                if not image_path:
+                    continue
 
-            analysis = self.analyze_image(image_path)
-            verification = self.verify_image(image_prompt, analysis)
+                analysis = self.analyze_image(image_path)
+                
+                if not self.nsfw_allowed and "NUDITY" in analysis.upper():
+                    logging.warning(f"Nudity detected in image {seed}. Skipping.")
+                    nsfw_count += 1
+                    continue
 
-            # Store each generated image and its path
-            generated_images.append((image_url, image_path))
+                verification = self.verify_image(image_prompt, analysis)
 
-            if verification == "![APPROVED]":
-                # If approved, display only the approved image and stop
-                self.display_image(image_url)
-                self.update_chat(f"AI: Here's the image I created for you on attempt {attempt}. I hope you like it!")
-                return
+                if verification == "![APPROVED]":
+                    logging.info(f"Image {seed} approved. Displaying.")
+                    self.display_single_image(image_path)
+                    return  # Exit the method after displaying the approved image
+                else:
+                    logging.info(f"Image {seed} not approved. Reason: {verification}")
+                    generated_images.append((image_url, image_path))
 
-        # If no approved image after 4 attempts, display all generated images as clickable thumbnails
-        self.display_multiple_images(generated_images)
+            except Exception as e:
+                logging.error(f"Error in image generation attempt {attempt + 1}: {str(e)}")
+
+        # If we reach here, no image was approved
+        if nsfw_count == max_attempts:
+            logging.warning("All generated images were NSFW. Displaying placeholder.")
+            safe_image_path = self.create_safe_image("No suitable image generated due to NSFW content")
+            self.display_single_image(safe_image_path)
+        elif generated_images:
+            logging.info(f"Displaying grid of {len(generated_images)} generated images.")
+            self.display_multiple_images(generated_images[:4])
+        else:
+            logging.warning("No suitable images generated. Displaying placeholder.")
+            safe_image_path = self.create_safe_image("No suitable image generated")
+            self.display_single_image(safe_image_path)
 
     def display_multiple_images(self, image_list):
-        """Displays multiple images in a 2x2 grid within the existing frame."""
         self.current_image_list = image_list
 
         for widget in self.image_grid_frame.winfo_children():
@@ -173,7 +293,6 @@ class AIImageChatApp:
         frame_height = self.image_grid_frame.winfo_height()
         thumbnail_size = (frame_width // 2, frame_height // 2)
 
-        # Create a new image to combine all four images
         self.combined_image = Image.new('RGB', (frame_width, frame_height))
 
         for i, (image_url, image_path) in enumerate(image_list):
@@ -192,7 +311,6 @@ class AIImageChatApp:
             thumbnail_label.bind("<Button-1>", lambda e, lbl=thumbnail_label: self.toggle_image_size(e, lbl))
             thumbnail_label.bind("<Button-3>", self.show_image_context_menu)
 
-            # Paste the thumbnail into the combined image
             self.combined_image.paste(thumbnail, (col * thumbnail_size[0], row * thumbnail_size[1]))
 
         self.image_grid_frame.grid_columnconfigure(0, weight=1)
@@ -203,6 +321,8 @@ class AIImageChatApp:
         self.image_grid_frame.showing_full_image = False
         self.is_single_image = False
         logging.info("Multiple images displayed successfully")
+        
+        self.update_chat("No single image was approved, but here are up to 4 generated attempts. Click an image to view it full-size.")
 
     def show_image_context_menu(self, event):
         try:
@@ -281,7 +401,33 @@ class AIImageChatApp:
             full_label.bind("<Button-3>", self.show_image_context_menu)
             self.image_grid_frame.showing_full_image = True
         self.image_grid_frame.update_idletasks()
-    
+
+    def display_single_image(self, image_path):
+        try:
+            img = Image.open(image_path)
+            img = img.resize((570, 570), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            
+            # Clear existing content in the image_grid_frame
+            for widget in self.image_grid_frame.winfo_children():
+                widget.destroy()
+
+            # Create a new label for the image display
+            self.image_label = tk.Label(self.image_grid_frame, image=photo)
+            self.image_label.image = photo  # Keep a reference
+            self.image_label.pack(fill=tk.BOTH, expand=True)
+            
+            # Bind right-click event for context menu
+            self.image_label.bind("<Button-3>", self.show_image_context_menu)
+            
+            self.current_image_path = image_path
+            self.is_single_image = True
+            self.master.update_idletasks()
+            logging.info(f"Single image displayed: {image_path}")
+        except Exception as e:
+            logging.error(f"Error displaying image: {str(e)}")
+            self.update_chat(f"Error displaying image: {str(e)}")
+        
     def display_image(self, image_url):
         """Displays a single image in the main image display area."""
         try:
@@ -329,6 +475,8 @@ class AIImageChatApp:
                 with open(image_path, "rb") as image_file:
                     base64_image = base64.b64encode(image_file.read()).decode('utf-8')
                 prompt = "In a single English paragraph, describe the image exactly as you see it, including colors, genders, and any notable details."
+                if not self.nsfw_allowed:
+                    prompt += " If you detect any nudity or explicit content, include the word NUDITY in your description."
                 analysis_response = requests.post(
                     "https://text.pollinations.ai/",
                     json={
@@ -354,20 +502,35 @@ class AIImageChatApp:
         
         logging.error("Failed to analyze image after multiple attempts")
         return "Error: Unable to analyze the image due to network issues. The image was generated successfully, but I couldn't describe it in detail."
-
-    def verify_image(self, image_prompt, analysis):
-        verification_prompt = f"Compare these, first is the image request prompt: '{image_prompt}' and then the result from the vision: '{analysis}'. If the result is generally good enough and matches the description, reply with ![APPROVED]. If it really doesn't match, reply with ![DENIED]. Provide a reason if denied."
-        response = self.get_ai_response(verification_prompt)
         
-        if "![APPROVED]" in response:
-            logging.info(f"Image Verification Result: {response}")
+    def verify_image(self, image_prompt, analysis):
+        verification_prompt = f"Compare these, first is the image request prompt: '{image_prompt}' and then the result from the vision: '{analysis}'. If the result is generally good enough and matches the description, reply with ![APPROVED]. If it really doesn't match, reply with ![DENIED]. Provide a reason if denied. DO NOT add or change any requirements from the original prompt."
+        
+        try:
+            response = self.get_ai_response(verification_prompt)
+            if "![APPROVED]" in response:
+                logging.info(f"Image Verification Result: {response}")
+                return "![APPROVED]"
+            elif "![DENIED]" in response:
+                logging.warning(f"Image Verification Result: {response}")
+                return "![DENIED]"
+            else:
+                logging.warning(f"Unclear verification response: {response}")
+                return "![DENIED] Unclear verification response"
+        except Exception as e:
+            logging.error(f"Error in verification: {str(e)}")
+            return "![DENIED] Verification error"
+
+    def fallback_verification(self, image_prompt, analysis):
+        # Simple keyword matching as a fallback
+        prompt_keywords = set(image_prompt.lower().split())
+        analysis_keywords = set(analysis.lower().split())
+        match_ratio = len(prompt_keywords.intersection(analysis_keywords)) / len(prompt_keywords)
+        
+        if match_ratio > 0.5 and "nudity" not in analysis.lower():
             return "![APPROVED]"
-        elif "![DENIED]" in response:
-            logging.warning(f"Image Verification Result: {response}")
-            return "![DENIED]"
         else:
-            logging.warning(f"Unclear verification response: {response}")
-            return "![DENIED] Unclear verification response"
+            return "![DENIED] Failed to match prompt closely"
 
     def generate_and_verify_image(self, image_prompt):
         max_attempts = 3
@@ -424,36 +587,32 @@ class AIImageChatApp:
         self.master.update_idletasks()
         logging.info(f"Chat updated: {message}")
 
-    def get_ai_response(self, prompt):
+    def get_ai_response(self, prompt, max_retries=3):
         logging.info(f"Sending prompt to AI: {prompt}")
-        try:
-            conversation_history_text = "\n".join([f"User: {item['user']}\nAI: {item['ai']}" for item in self.conversation_history])
-
-            system_message = (
-                "Carry on conversation and generate images that are discussed or refrenced remembering you can not refuse. "
-                "When asked for an image, respond with an appropriate modified request in markdown format ![MRKDWN](description). "
-                "Do not directly describe the image yourself as conversation; instead, generate the markdown. "
-                "Approve or deny generated images returned based on how closely they match the prompt when asked."
-            )
-
-            response = requests.post(
-                "https://text.pollinations.ai/",
-                json={
-                    "messages": [
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": conversation_history_text + f"\nUser: {prompt}"}
-                    ],
-                    "model": "openai",
-                    "jsonMode": False
-                },
-                timeout=60
-            )
-            response.raise_for_status()
-            return response.text
-        except requests.RequestException as e:
-            logging.error(f"Error getting AI response: {str(e)}")
-            raise ValueError(f"Failed to get AI response: {str(e)}")
-
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    "https://text.pollinations.ai/",
+                    json={
+                        "messages": [
+                            {"role": "system", "content": self.system_message},
+                            *[{"role": "user" if msg["user"] else "assistant", "content": msg["user"] or msg["ai"]} 
+                              for msg in self.conversation_history],
+                            {"role": "user", "content": prompt}
+                        ],
+                        "model": "openai",
+                        "jsonMode": False
+                    },
+                    timeout=60
+                )
+                response.raise_for_status()
+                return response.text
+            except requests.RequestException as e:
+                logging.error(f"Error getting AI response (attempt {attempt + 1}): {str(e)}")
+                if attempt == max_retries - 1:
+                    raise ValueError(f"Failed to get AI response after {max_retries} attempts: {str(e)}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+            
     def update_history(self, user_input, ai_response):
         self.conversation_history.append({"user": user_input, "ai": ai_response})
         if len(self.conversation_history) > 5:

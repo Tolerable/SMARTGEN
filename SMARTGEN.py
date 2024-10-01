@@ -47,37 +47,9 @@ class AIImageChatApp:
         self.conversation_history = []
 
         # Add right-click context menu
-        self.image_menu = tk.Menu(self.image_grid_frame, tearoff=0)
+        self.image_menu = tk.Menu(self.master, tearoff=0)
         self.image_menu.add_command(label="COPY", command=self.copy_image_to_clipboard)
         self.image_label.bind("<Button-3>", self.show_image_context_menu)
-
-    def show_image_context_menu(self, event):
-        """Shows the right-click context menu on the image frame"""
-        try:
-            self.image_menu.post(event.x_root, event.y_root)
-        except Exception as e:
-            logging.error(f"Error showing context menu: {str(e)}")
-
-    def copy_image_to_clipboard(self):
-        """Copies the current image to the clipboard"""
-        if self.current_image_paths:
-            try:
-                image = Image.open(self.current_image_paths[0])  # Copy the first image
-                output = io.BytesIO()
-                image.convert('RGB').save(output, 'BMP')
-                data = output.getvalue()[14:]  # Remove the BMP header for clipboard
-                output.close()
-
-                # Copy to clipboard
-                win32clipboard.OpenClipboard()
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
-                win32clipboard.CloseClipboard()
-                logging.info("Image copied to clipboard successfully")
-            except Exception as e:
-                logging.error(f"Error copying image to clipboard: {str(e)}")
-        else:
-            logging.info("No image available to copy")
 
     def send_message(self, event=None):
         user_input = self.input_area.get("1.0", tk.END).strip()
@@ -131,13 +103,15 @@ class AIImageChatApp:
         match = re.search(r'!\[MRKDWN\]\((.*?)\)', text)
         return match.group(1) if match else None
 
-    def generate_image(self, prompt):
+    def generate_image(self, prompt, seed):
         try:
-            seed = random.randint(1, 1000000)  # Random seed to avoid caching
-            response = requests.get(f"https://image.pollinations.ai/prompt/{prompt}?model=flux&width=570&height=570&seed={seed}&nologo=true&nofeed=true", timeout=60)
+            response = requests.get(
+                f"https://image.pollinations.ai/prompt/{prompt}?model=flux&width=570&height=570&seed={seed}&nologo=true&nofeed=true",
+                timeout=60
+            )
             response.raise_for_status()
             image_url = response.url
-            logging.info(f"Generated image URL: {image_url} with seed {seed}")
+            logging.info(f"Generated image URL: {image_url}")
             return image_url
         except requests.RequestException as e:
             logging.error(f"Error generating image: {str(e)}")
@@ -149,11 +123,12 @@ class AIImageChatApp:
         max_attempts = 4
 
         for attempt in range(1, max_attempts + 1):
-            image_url = self.generate_image(image_prompt)
+            seed = random.randint(1, 1000000)  # Random seed for each attempt
+            image_url = self.generate_image(image_prompt, seed)  # Pass seed to image generation
             if not image_url:
                 continue  # Skip to next attempt if image generation failed
 
-            image_path = self.save_image(image_url)
+            image_path = self.save_image(image_url, seed)  # Save image with seed-based unique path
             analysis = self.analyze_image(image_path)
             verification = self.verify_image(image_prompt, analysis)
 
@@ -170,50 +145,90 @@ class AIImageChatApp:
         self.display_multiple_images(generated_images)
 
     def display_multiple_images(self, image_list):
-        """Displays multiple images as clickable thumbnails and allows enlarging/shrinking on click."""
-        thumbnail_size = (150, 150)  # Thumbnail size for smaller images
+        """Displays multiple images in a 2x2 grid within the existing frame."""
+        self.current_image_list = image_list
 
-        # Clear the image grid frame before displaying new images
         for widget in self.image_grid_frame.winfo_children():
             widget.destroy()
+
+        frame_width = self.image_grid_frame.winfo_width()
+        frame_height = self.image_grid_frame.winfo_height()
+        thumbnail_size = (frame_width // 2, frame_height // 2)
 
         for i, (image_url, image_path) in enumerate(image_list):
             img = Image.open(image_path)
             thumbnail = img.resize(thumbnail_size, Image.LANCZOS)
-
-            # Convert the thumbnail to a PhotoImage to display
             photo_thumbnail = ImageTk.PhotoImage(thumbnail)
 
-            # Create a label for each thumbnail
-            thumbnail_label = tk.Label(self.image_grid_frame, image=photo_thumbnail)
-            thumbnail_label.photo = photo_thumbnail  # Store reference to avoid garbage collection
+            row = i // 2
+            col = i % 2
+            
+            thumbnail_label = tk.Label(self.image_grid_frame, image=photo_thumbnail, borderwidth=1, relief="solid")
+            thumbnail_label.photo = photo_thumbnail
+            thumbnail_label.original_image = img
+            thumbnail_label.image_path = image_path
+            thumbnail_label.grid(row=row, column=col, sticky="nsew")
+            thumbnail_label.bind("<Button-1>", lambda e, lbl=thumbnail_label: self.toggle_image_size(e, lbl))
+            thumbnail_label.bind("<Button-3>", lambda e, path=image_path: self.show_image_context_menu(e, path))
 
-            # Use grid to arrange the thumbnails in a 2x2 grid
-            row = i // 2  # Integer division to get row index
-            col = i % 2   # Modulo to get column index
-            thumbnail_label.grid(row=row, column=col, padx=5, pady=5)
+        self.image_grid_frame.grid_columnconfigure(0, weight=1)
+        self.image_grid_frame.grid_columnconfigure(1, weight=1)
+        self.image_grid_frame.grid_rowconfigure(0, weight=1)
+        self.image_grid_frame.grid_rowconfigure(1, weight=1)
 
-            # Bind click to enlarge/shrink image
-            thumbnail_label.bind("<Button-1>", lambda event, img=img, lbl=thumbnail_label: self.toggle_image_size(event, img, lbl))
+        self.image_grid_frame.showing_full_image = False
 
-    def toggle_image_size(self, event, img, label):
-        """Toggles between enlarging and shrinking the image when clicked."""
-        if getattr(label, 'enlarged', False):
-            # Shrink image back to thumbnail size
-            thumbnail_size = (150, 150)
-            thumbnail = img.resize(thumbnail_size, Image.LANCZOS)
-            photo_thumbnail = ImageTk.PhotoImage(thumbnail)
-            label.config(image=photo_thumbnail)
-            label.photo = photo_thumbnail
-            label.enlarged = False
+    def show_image_context_menu(self, event, img_path):
+        """Shows the right-click context menu on the image frame and stores the image path to be copied."""
+        self.current_image_to_copy = img_path
+        try:
+            self.image_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.image_menu.grab_release()
+
+    def copy_image_to_clipboard(self):
+        """Copies the right-clicked image to the clipboard."""
+        if hasattr(self, 'current_image_to_copy'):
+            try:
+                image = Image.open(self.current_image_to_copy)
+                output = io.BytesIO()
+                image.convert('RGB').save(output, 'BMP')
+                data = output.getvalue()[14:]  # Remove the BMP header for clipboard
+                output.close()
+
+                win32clipboard.OpenClipboard()
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+                win32clipboard.CloseClipboard()
+                logging.info("Image copied to clipboard successfully")
+            except Exception as e:
+                logging.error(f"Error copying image to clipboard: {str(e)}")
         else:
-            # Enlarge image to original size
-            enlarged_img = img.resize((570, 570), Image.LANCZOS)
-            photo_enlarged = ImageTk.PhotoImage(enlarged_img)
-            label.config(image=photo_enlarged)
-            label.photo = photo_enlarged
-            label.enlarged = True
+            logging.info("No image available to copy")
 
+    def toggle_image_size(self, event, label):
+        """Toggles between 2x2 grid and full-sized image."""
+        if getattr(self.image_grid_frame, 'showing_full_image', False):
+            self.display_multiple_images(self.current_image_list)
+        else:
+            for widget in self.image_grid_frame.winfo_children():
+                widget.destroy()
+
+            frame_width = self.image_grid_frame.winfo_width()
+            frame_height = self.image_grid_frame.winfo_height()
+            full_img = label.original_image.resize((frame_width, frame_height), Image.LANCZOS)
+            photo_full = ImageTk.PhotoImage(full_img)
+
+            full_label = tk.Label(self.image_grid_frame, image=photo_full)
+            full_label.photo = photo_full
+            full_label.pack(fill=tk.BOTH, expand=True)
+            full_label.bind("<Button-1>", lambda e, lbl=label: self.toggle_image_size(e, lbl))
+            full_label.bind("<Button-3>", lambda e, path=label.image_path: self.show_image_context_menu(e, path))
+
+            self.image_grid_frame.showing_full_image = True
+
+        self.image_grid_frame.update_idletasks()
+    
     def display_image(self, image_url):
         """Displays a single image in the main image display area."""
         try:
@@ -228,7 +243,7 @@ class AIImageChatApp:
             self.image_label.image = photo  # Keep a reference to avoid garbage collection
 
             # Store the current image path for copy functionality
-            self.current_image_path = self.save_image(image_url)
+            self.current_image_path = self.save_image(image_url, seed)
             logging.info("Image displayed successfully")
 
         except Exception as e:
@@ -300,13 +315,16 @@ class AIImageChatApp:
 
         return image_url
 
-    def save_image(self, image_url):
+    def save_image(self, image_url, seed):
         try:
             response = requests.get(image_url, timeout=30)
             response.raise_for_status()
             img = Image.open(io.BytesIO(response.content))
-            path = "temp_image.png"  # Changed to PNG for better clipboard compatibility
+
+            # Use seed to generate unique filename
+            path = f"temp_image_{seed}.png"
             img.save(path)
+
             self.current_image_paths.append(path)  # Store image path for clipboard
             return path
         except Exception as e:
@@ -354,6 +372,11 @@ class AIImageChatApp:
         except requests.RequestException as e:
             logging.error(f"Error getting AI response: {str(e)}")
             return "Error getting AI response."
+
+    def update_history(self, user_input, ai_response):
+        self.conversation_history.append({"user": user_input, "ai": ai_response})
+        if len(self.conversation_history) > 5:
+            self.conversation_history.pop(0)
 
     def update_status(self, status):
         self.status_label.config(text=status)

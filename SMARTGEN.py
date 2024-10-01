@@ -311,12 +311,11 @@ class AIImageChatApp:
         response.raise_for_status()
         return Image.open(io.BytesIO(response.content))
 
-    def analyze_image(self, image_path, retries=3):
+    def analyze_image(self, image_path, retries=3, backoff_factor=0.5):
         for attempt in range(retries):
             try:
                 with open(image_path, "rb") as image_file:
                     base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-                # Send image to AI for analysis
                 prompt = "In a single English paragraph, describe the image exactly as you see it, including colors, genders, and any notable details."
                 analysis_response = requests.post(
                     "https://text.pollinations.ai/",
@@ -336,9 +335,13 @@ class AIImageChatApp:
                 analysis_response.raise_for_status()
                 return analysis_response.text
             except requests.RequestException as e:
-                logging.error(f"Error analyzing image: {str(e)}")
-                if attempt == retries - 1:  # If last attempt
-                    return "Error analyzing image."
+                wait_time = backoff_factor * (2 ** attempt)
+                logging.error(f"Error analyzing image (attempt {attempt + 1}/{retries}): {str(e)}")
+                logging.info(f"Retrying in {wait_time:.2f} seconds...")
+                time.sleep(wait_time)
+        
+        logging.error("Failed to analyze image after multiple attempts")
+        return "Error: Unable to analyze the image due to network issues. The image was generated successfully, but I couldn't describe it in detail."
 
     def verify_image(self, image_prompt, analysis):
         verification_prompt = f"Compare these, first is the image request prompt: '{image_prompt}' and then the result from the vision: '{analysis}'. If the result is generally good enough and matches the description, reply with ![APPROVED]. If it really doesn't match, reply with ![DENIED]. Provide a reason if denied."

@@ -23,14 +23,10 @@ class AIImageChatApp:
         self.main_frame = tk.Frame(master, padx=15, pady=15, bg='white')
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Create a grid frame for multiple images (must come before image_label)
+        # Create a grid frame for multiple images
         self.image_grid_frame = tk.Frame(self.main_frame, width=570, height=570, bg='lightgray')
         self.image_grid_frame.pack(pady=(0, 10))
         self.image_grid_frame.pack_propagate(False)
-
-        # Now define image_label after image_grid_frame is created
-        self.image_label = tk.Label(self.image_grid_frame, bg='lightgray')
-        self.image_label.pack(fill=tk.BOTH, expand=True)
 
         self.current_image_paths = []  # To store paths of generated images for toggling
 
@@ -50,7 +46,9 @@ class AIImageChatApp:
         # Add right-click context menu
         self.image_menu = tk.Menu(self.master, tearoff=0)
         self.image_menu.add_command(label="COPY", command=self.copy_image_to_clipboard)
-        self.image_label.bind("<Button-3>", self.show_image_context_menu)
+
+        # Initialize image_label as None
+        self.image_label = None
 
     def send_message(self, event=None):
         user_input = self.input_area.get("1.0", tk.END).strip()
@@ -212,34 +210,33 @@ class AIImageChatApp:
 
     def toggle_image_size(self, event, label):
         """Toggles between 2x2 grid and full-sized image."""
+        if not hasattr(self, 'current_image_list'):
+            return  # Do nothing if there's no image list (single image view)
+        
         if getattr(self.image_grid_frame, 'showing_full_image', False):
             self.display_multiple_images(self.current_image_list)
         else:
             for widget in self.image_grid_frame.winfo_children():
                 widget.destroy()
-
             frame_width = self.image_grid_frame.winfo_width()
             frame_height = self.image_grid_frame.winfo_height()
             full_img = label.original_image.resize((frame_width, frame_height), Image.LANCZOS)
             photo_full = ImageTk.PhotoImage(full_img)
-
             full_label = tk.Label(self.image_grid_frame, image=photo_full)
             full_label.photo = photo_full
             full_label.pack(fill=tk.BOTH, expand=True)
             full_label.bind("<Button-1>", lambda e, lbl=label: self.toggle_image_size(e, lbl))
             full_label.bind("<Button-3>", lambda e, path=label.image_path: self.show_image_context_menu(e, path))
-
             self.image_grid_frame.showing_full_image = True
-
         self.image_grid_frame.update_idletasks()
     
     def display_image(self, image_url):
         """Displays a single image in the main image display area."""
         try:
-            response = requests.get(image_url, timeout=30)  # Download the image
+            response = requests.get(image_url, timeout=30)
             response.raise_for_status()
-            img = Image.open(io.BytesIO(response.content))  # Open the image
-            img = img.resize((570, 570), Image.LANCZOS)  # Resize to fit the frame
+            img = Image.open(io.BytesIO(response.content))
+            img = img.resize((570, 570), Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
 
             # Clear existing content in the image_grid_frame
@@ -256,6 +253,11 @@ class AIImageChatApp:
 
             # Bind the right-click event to the new label
             self.image_label.bind("<Button-3>", lambda e: self.show_image_context_menu(e, self.current_image_path))
+
+            # Reset the showing_full_image flag and clear current_image_list
+            self.image_grid_frame.showing_full_image = False
+            if hasattr(self, 'current_image_list'):
+                del self.current_image_list
 
             logging.info("Image displayed successfully")
 

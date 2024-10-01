@@ -9,6 +9,7 @@ import logging
 import random
 import base64
 import win32clipboard
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -128,7 +129,10 @@ class AIImageChatApp:
             if not image_url:
                 continue  # Skip to next attempt if image generation failed
 
-            image_path = self.save_image(image_url, seed)  # Save image with seed-based unique path
+            image_path = self.save_image(image_url, seed)  # Pass seed to save_image
+            if not image_path:
+                continue  # Skip if saving failed
+
             analysis = self.analyze_image(image_path)
             verification = self.verify_image(image_prompt, analysis)
 
@@ -238,12 +242,21 @@ class AIImageChatApp:
             img = img.resize((570, 570), Image.LANCZOS)  # Resize to fit the frame
             photo = ImageTk.PhotoImage(img)
 
-            # Update the label with the new image
-            self.image_label.config(image=photo)
+            # Clear existing content in the image_grid_frame
+            for widget in self.image_grid_frame.winfo_children():
+                widget.destroy()
+
+            # Create a new label for the image
+            self.image_label = tk.Label(self.image_grid_frame, image=photo, bg='lightgray')
             self.image_label.image = photo  # Keep a reference to avoid garbage collection
+            self.image_label.pack(fill=tk.BOTH, expand=True)
 
             # Store the current image path for copy functionality
-            self.current_image_path = self.save_image(image_url, seed)
+            self.current_image_path = self.save_image(image_url)
+
+            # Bind the right-click event to the new label
+            self.image_label.bind("<Button-3>", lambda e: self.show_image_context_menu(e, self.current_image_path))
+
             logging.info("Image displayed successfully")
 
         except Exception as e:
@@ -315,17 +328,22 @@ class AIImageChatApp:
 
         return image_url
 
-    def save_image(self, image_url, seed):
+    def save_image(self, image_url, seed=None):
         try:
             response = requests.get(image_url, timeout=30)
             response.raise_for_status()
             img = Image.open(io.BytesIO(response.content))
 
-            # Use seed to generate unique filename
-            path = f"temp_image_{seed}.png"
+            # Use seed if provided, otherwise use timestamp
+            if seed is not None:
+                path = f"temp_image_{seed}.png"
+            else:
+                timestamp = int(time.time())
+                path = f"temp_image_{timestamp}.png"
+
             img.save(path)
 
-            self.current_image_paths.append(path)  # Store image path for clipboard
+            self.current_image_paths.append(path)  # Append to list instead of resetting
             return path
         except Exception as e:
             logging.error(f"Error saving image: {str(e)}")

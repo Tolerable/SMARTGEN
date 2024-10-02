@@ -296,8 +296,9 @@ class AIImageChatApp:
         label = self.image_placeholders[index]
         label.config(image=photo)
         label.photo = photo
-        label.original_image = img  # Store the original image
+        label.original_image = img
         label.image_path = image_path
+        label.bind("<Button-3>", self.show_image_context_menu)
 
     def toggle_image_size(self, event, label):
         frame_width = 500
@@ -337,12 +338,9 @@ class AIImageChatApp:
         self.image_grid_frame.update_idletasks()
 
     def copy_image_to_clipboard(self):
-        """Copy the selected image to the clipboard."""
         try:
-            if self.current_image_paths:
-                # Assuming you're copying the most recently generated image
-                image_path = self.current_image_paths[-1]
-                img = Image.open(image_path)
+            if hasattr(self, 'current_copied_image') and os.path.exists(self.current_copied_image):
+                img = Image.open(self.current_copied_image)
                 output = io.BytesIO()
                 img.convert('RGB').save(output, 'BMP')
                 data = output.getvalue()[14:]  # Remove BMP header
@@ -353,9 +351,9 @@ class AIImageChatApp:
                 win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
                 win32clipboard.CloseClipboard()
 
-                logging.info("Image copied to clipboard.")
+                logging.info(f"Image copied to clipboard: {self.current_copied_image}")
             else:
-                logging.error("No images to copy.")
+                logging.error("No image selected or image file not found.")
         except Exception as e:
             logging.error(f"Error copying image to clipboard: {str(e)}")
 
@@ -390,11 +388,11 @@ class AIImageChatApp:
         except Exception as e:
             logging.error(f"Error copying all images to clipboard: {str(e)}")
 
-    def show_image_context_menu(self, index):
-        """Show the right-click context menu for copying images."""
-        label = self.image_placeholders[index]
-        if label.image_path:
-            self.image_menu.tk_popup(self.master.winfo_pointerx(), self.master.winfo_pointery())
+    def show_image_context_menu(self, event):
+        label = event.widget
+        if hasattr(label, 'image_path'):
+            self.current_copied_image = label.image_path
+            self.image_menu.tk_popup(event.x_root, event.y_root)
 
     def get_ai_response(self, prompt, retry_count=3):
         """Get a response from the AI using the text generation API."""

@@ -4,6 +4,7 @@ from PIL import Image, ImageTk
 import requests
 import io
 import re
+import os
 import threading
 import logging
 import random
@@ -12,7 +13,6 @@ import time
 import win32clipboard  # For clipboard copy
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 class AIImageChatApp:
     def __init__(self, master):
@@ -60,7 +60,16 @@ class AIImageChatApp:
         self.image_menu = Menu(self.master, tearoff=0)
         self.image_menu.add_command(label="Copy Image", command=self.copy_image_to_clipboard)
         self.image_menu.add_command(label="Copy All", command=self.copy_all_images_to_clipboard)
-
+        
+        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        self.cleanup_temp_files()  # Initial cleanup
+        self.master.after(3600000, self.periodic_cleanup)
+        
+    def periodic_cleanup(self):
+        self.cleanup_temp_files()
+        self.master.after(3600000, self.periodic_cleanup)  # Schedule next cleanup
+        
     def refine_prompt(self, base_prompt, enhanced_prompt, analysis):
         """
         Refine the prompt based on the user's original prompt, the AI's enhanced version, and the vision model's analysis.
@@ -206,7 +215,8 @@ class AIImageChatApp:
                 self.update_chat(f"Error during image generation in iteration {i+1}: {str(e)}")
 
         self.update_chat("All images generated.")
-
+        self.cleanup_temp_files()
+        
     def enhance_prompt(self, base_prompt):
         """Enhance the base prompt for better image generation."""
         enhanced_prompt = f"Enhanced version of: {base_prompt} with more vivid details."
@@ -224,12 +234,11 @@ class AIImageChatApp:
             return None
 
     def save_image(self, image_url):
-        """Download the generated image from the URL and save it locally."""
         try:
             response = requests.get(image_url, timeout=30)
             response.raise_for_status()
             img = Image.open(io.BytesIO(response.content))
-            path = f"generated_image_{int(time.time())}.png"
+            path = f"temp_image_{int(time.time())}.png"
             img.save(path)
             self.current_image_paths.append(path)
             return path
@@ -237,6 +246,18 @@ class AIImageChatApp:
             logging.error(f"Error saving image: {str(e)}")
             return None
 
+    def cleanup_temp_files(self):
+        current_time = time.time()
+        for filename in os.listdir('.'):
+            if filename.startswith('temp_image_') and filename.endswith('.png'):
+                file_time = int(filename.split('_')[2].split('.')[0])
+                if current_time - file_time > 3600:  # Delete files older than 1 hour
+                    try:
+                        os.remove(filename)
+                        logging.info(f"Deleted old temporary file: {filename}")
+                    except Exception as e:
+                        logging.error(f"Error deleting temporary file {filename}: {str(e)}")
+    
     def analyze_image(self, image_path):
         """Send the image to the vision API to extract a text description."""
         try:
@@ -440,6 +461,10 @@ class AIImageChatApp:
         self.status_label.config(text=status)
         logging.info(f"Status updated: {status}")
 
+
+    def on_closing(self):
+        self.cleanup_temp_files()
+        self.master.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()

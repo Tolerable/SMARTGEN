@@ -18,7 +18,7 @@ class AIImageChatApp:
     def __init__(self, master):
         self.master = master
         master.title("AI Image Chat")
-        master.geometry("600x840")
+        master.geometry("600x800")
         master.configure(bg='white')
 
         self.main_frame = tk.Frame(master, padx=15, pady=15, bg='white')
@@ -41,8 +41,9 @@ class AIImageChatApp:
         self.input_area.pack()
         self.input_area.bind("<Return>", self.send_message)
 
-        self.status_label = tk.Label(self.main_frame, text="", bg='white')
-        self.status_label.pack(pady=(10, 0))
+        # Adjust the status bar to stay at the bottom
+        self.status_label = tk.Label(self.master, text="", bd=1, relief=tk.SUNKEN, anchor=tk.W, bg='white')
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.conversation_history = []
         self.current_image_paths = []  # Store paths of generated images
@@ -99,7 +100,6 @@ class AIImageChatApp:
         """
         return analysis.strip()
 
-
     def create_placeholders(self):
         """Create placeholders for the 2x2 image grid."""
         placeholder_image = Image.new('RGB', (250, 250), color='lightgray')
@@ -110,7 +110,7 @@ class AIImageChatApp:
             col = i % 2
             label = tk.Label(self.image_grid_frame, image=self.placeholders[i], borderwidth=1, relief="solid")
             label.grid(row=row, column=col, sticky="nsew")
-            label.bind("<Button-1>", lambda e, label=label: self.toggle_image_size(label))
+            label.bind("<Button-1>", lambda e, label=label: self.toggle_image_size(e, label))
             label.bind("<Button-3>", lambda e, index=i: self.show_image_context_menu(index))
             self.image_placeholders[i] = label
 
@@ -269,42 +269,51 @@ class AIImageChatApp:
             return "Error analyzing image."
 
     def display_image(self, image_path, index):
-        """Display generated images in the 2x2 grid with click-to-enlarge functionality."""
-        img = Image.open(image_path).resize((250, 250), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(img)
+        img = Image.open(image_path)
+        thumbnail = img.copy().resize((250, 250), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(thumbnail)
         label = self.image_placeholders[index]
         label.config(image=photo)
         label.photo = photo
+        label.original_image = img  # Store the original image
         label.image_path = image_path
 
-    def toggle_image_size(self, label):
-        """Toggle between grid view and full-sized image view."""
+    def toggle_image_size(self, event, label):
         frame_width = 500
         frame_height = 500
 
         if getattr(self.image_grid_frame, 'showing_full_image', False):
             # Return to grid view
             for widget in self.image_grid_frame.winfo_children():
-                widget.grid()  # Restore the grid layout
+                if isinstance(widget, tk.Label):
+                    widget.grid()
             self.image_grid_frame.showing_full_image = False
-        else:
-            # Hide the grid view
+            # Remove the full-size image label
             for widget in self.image_grid_frame.winfo_children():
-                widget.grid_remove()
+                if widget.grid_info().get('columnspan') == 2:
+                    widget.destroy()
+        else:
+            # Show full-size image
+            if hasattr(label, 'original_image'):
+                full_img = label.original_image.copy().resize((frame_width, frame_height), Image.LANCZOS)
+                photo_full = ImageTk.PhotoImage(full_img)
+                
+                full_label = tk.Label(self.image_grid_frame, image=photo_full)
+                full_label.photo = photo_full
+                full_label.original_image = label.original_image
+                full_label.image_path = label.image_path
+                full_label.grid(row=0, column=0, columnspan=2, rowspan=2, sticky="nsew")
+                full_label.bind("<Button-1>", lambda e, lbl=full_label: self.toggle_image_size(e, lbl))
+                full_label.bind("<Button-3>", lambda e, index=self.image_placeholders.index(label): self.show_image_context_menu(index))
+                
+                # Hide other images but keep them in the grid
+                for widget in self.image_grid_frame.winfo_children():
+                    if widget != full_label:
+                        widget.grid_remove()
+                
+                self.image_grid_frame.showing_full_image = True
 
-            # Show full-sized image
-            full_img = Image.open(label.image_path).resize((frame_width, frame_height), Image.LANCZOS)
-            photo_full = ImageTk.PhotoImage(full_img)
-
-            # Create a new label to display the full-sized image
-            full_label = tk.Label(self.image_grid_frame, image=photo_full)
-            full_label.photo = photo_full
-            full_label.grid(row=0, column=0, sticky="nsew")
-
-            # Bind left-click to toggle back to grid view
-            full_label.bind("<Button-1>", lambda e: self.toggle_image_size(label))
-
-            self.image_grid_frame.showing_full_image = True
+        self.image_grid_frame.update_idletasks()
 
     def copy_image_to_clipboard(self):
         """Copy the selected image to the clipboard."""

@@ -6,10 +6,11 @@ SMARTGEN is a Python-based application that generates AI images based on user in
 
 ### Features
 
-- Generate images from prompts.
-- Automated image verification for prompt accuracy.
-- Ability to retry and generate up to 4 images if needed.
-- Thumbnail display of all generated images.
+- Generate images from user concepts.
+- Automated image visualization for prompt enhancement.
+- Generates 4 images allowing different models and user styles.
+- Thumbnail display of all generated images and ability to enlarge.
+- Allows for Single or 4 Cell Copy to Clipboard to use elsewhere.
 - NSFW / SFW filter toggle attempt to reduce unwanted content.
 
 ### Installation

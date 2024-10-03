@@ -326,7 +326,7 @@ class AIImageChatApp:
                 full_label.image_path = label.image_path
                 full_label.grid(row=0, column=0, columnspan=2, rowspan=2, sticky="nsew")
                 full_label.bind("<Button-1>", lambda e, lbl=full_label: self.toggle_image_size(e, lbl))
-                full_label.bind("<Button-3>", lambda e, index=self.image_placeholders.index(label): self.show_image_context_menu(index))
+                full_label.bind("<Button-3>", self.show_image_context_menu)  # Corrected this line
                 
                 # Hide other images but keep them in the grid
                 for widget in self.image_grid_frame.winfo_children():

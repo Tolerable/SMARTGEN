@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import scrolledtext, Menu
+from tkinter import scrolledtext, Menu, ttk
 from PIL import Image, ImageTk
 import requests
 import io
@@ -11,16 +11,92 @@ import random
 import base64
 import time
 import math
-import win32clipboard  # For clipboard copy
+import win32clipboard 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+class StyleEditor:
+    def __init__(self, master, callback, initial_styles=None, initial_checkboxes=None, initial_models=None):
+        self.master = master
+        self.callback = callback
+        self.styles = initial_styles if initial_styles else [""] * 4
+        self.checkboxes = initial_checkboxes if initial_checkboxes else [False] * 4
+        self.models = initial_models if initial_models else ["flux"] * 4
+        
+        self.window = tk.Toplevel(master)
+        self.window.title("Style Editor")
+        
+        self.entries = []
+        self.checkbox_vars = []
+        self.model_vars = []
+        
+        # Fetch available models
+        self.available_models = self.fetch_models()
+        
+        for i in range(4):
+            var = tk.BooleanVar(value=self.checkboxes[i])
+            cb = ttk.Checkbutton(self.window, variable=var)
+            cb.grid(row=i, column=0)
+            self.checkbox_vars.append(var)
+            
+            entry = ttk.Entry(self.window, width=40)
+            entry.grid(row=i, column=1, padx=5, pady=5)
+            entry.insert(0, self.styles[i])
+            self.entries.append(entry)
+            
+            model_var = tk.StringVar(value=self.models[i])
+            model_dropdown = ttk.Combobox(self.window, textvariable=model_var, values=self.available_models, width=10)
+            model_dropdown.grid(row=i, column=2, padx=5)
+            self.model_vars.append(model_var)
+        
+        ttk.Button(self.window, text="Save", command=self.save).grid(row=4, column=1)
+        ttk.Button(self.window, text="Revert", command=self.revert).grid(row=4, column=2)
+        
+        self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+    
+    def fetch_models(self):
+        try:
+            response = requests.get("https://image.pollinations.ai/models")
+            return response.json()
+        except:
+            return ["flux", "flux-realism", "flux-anime", "flux-3d", "any-dark", "turbo"]
+    
+    def save(self):
+        self.styles = [entry.get() for entry in self.entries]
+        self.checkboxes = [var.get() for var in self.checkbox_vars]
+        self.models = [var.get() for var in self.model_vars]
+        self.callback(self.styles, self.checkboxes, self.models)
+        logging.info("Styles and models saved successfully")
+    
+    def revert(self):
+        for entry, style in zip(self.entries, self.styles):
+            entry.delete(0, tk.END)
+            entry.insert(0, style)
+        for var, checked in zip(self.checkbox_vars, self.checkboxes):
+            var.set(checked)
+        for var, model in zip(self.model_vars, self.models):
+            var.set(model)
+        logging.info("Styles and models reverted to last saved state")
+    
+    def on_closing(self):
+        self.save()
+        self.window.destroy()
+        
 class AIImageChatApp:
     def __init__(self, master):
         self.master = master
         master.title("AI Image Chat")
         master.geometry("600x800")
         master.configure(bg='white')
+        
+        # Create menu bar
+        self.menu_bar = Menu(master)
+        self.master.config(menu=self.menu_bar)
+
+        # Create Tools menu
+        self.tools_menu = Menu(self.menu_bar, tearoff=0)
+        self.menu_bar.add_cascade(label="Tools", menu=self.tools_menu)
+        self.tools_menu.add_command(label="Style Editor", command=self.open_style_editor)
 
         self.main_frame = tk.Frame(master, padx=15, pady=15, bg='white')
         self.main_frame.pack(fill=tk.BOTH, expand=True)
@@ -66,6 +142,19 @@ class AIImageChatApp:
         
         self.cleanup_temp_files()  # Initial cleanup
         self.master.after(3600000, self.periodic_cleanup)
+        
+        self.styles = [""] * 4
+        self.style_checkboxes = [False] * 4
+        self.models = ["flux"] * 4
+        
+    def open_style_editor(self):
+        StyleEditor(self.master, self.update_styles, self.styles, self.style_checkboxes, self.models)
+
+    def update_styles(self, styles, checkboxes, models):
+        self.styles = styles
+        self.style_checkboxes = checkboxes
+        self.models = models
+        logging.info("Styles and models updated in main application")
         
     def periodic_cleanup(self):
         self.cleanup_temp_files()
@@ -179,7 +268,6 @@ class AIImageChatApp:
         
         previous_enhanced_prompt = base_prompt
         previous_analysis = "No previous analysis"
-
         for i in range(4):
             if i == 0:
                 enhanced_prompt = (
@@ -193,22 +281,19 @@ class AIImageChatApp:
             
             # Generate image based on enhanced_prompt
             seed = random.randint(1, 1000000)
-            image_url = self.generate_image(enhanced_prompt, seed=seed)
+            selected_model = self.models[i] if self.style_checkboxes[i] else "flux"
+            image_url = self.generate_image(enhanced_prompt, seed=seed, model=selected_model)
             if not image_url:
                 self.update_chat(f"Failed to generate image for iteration {i+1}.")
                 continue
-
             # Save and display the generated image
             image_path = self.save_image(image_url)
             self.display_image(image_path, i)
-
             # Analyze the generated image
             analysis = self.analyze_image(image_path)
-
             # Update previous_enhanced_prompt and previous_analysis for the next iteration
             previous_enhanced_prompt = enhanced_prompt
             previous_analysis = analysis
-
         self.update_chat("All images generated.")
         self.cleanup_temp_files()
         
@@ -221,10 +306,9 @@ class AIImageChatApp:
         common_words = set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'])
         return [word.lower() for word in prompt.split() if word.lower() not in common_words]
 
-    def generate_image(self, prompt, seed):
-        """Call the image generation API with the enhanced prompt."""
+    def generate_image(self, prompt, seed=None, model="flux"):
         try:
-            url = f"https://image.pollinations.ai/prompt/{prompt}?model=flux&width=570&height=570&seed={seed}&nologo=true"
+            url = f"https://image.pollinations.ai/prompt/{prompt}?model={model}&width=570&height=570&seed={seed}&nologo=true"
             response = requests.get(url, timeout=60)
             response.raise_for_status()
             return response.url
@@ -395,7 +479,6 @@ class AIImageChatApp:
             self.image_menu.tk_popup(event.x_root, event.y_root)
 
     def get_ai_response(self, prompt, retry_count=3):
-        """Get a response from the AI using the text generation API."""
         logging.info(f"Sending prompt to AI: {prompt}")
 
         for attempt in range(retry_count):
@@ -406,26 +489,22 @@ class AIImageChatApp:
                         "messages": [
                             {"role": "system", "content": self.system_message},
                             {"role": "user", "content": prompt}
-                        ]
+                        ],
+                        "model": "openai",  # Make sure this is set correctly
+                        "seed": -1,
+                        "jsonMode": False
                     },
                     timeout=60
                 )
                 response.raise_for_status()
-
-                # Process the response as raw text
-                response_text = response.text.strip()
-
-                if response_text:
-                    return response_text  # Directly return the raw text
-                else:
-                    raise ValueError("Received empty response from AI")
+                return response.text.strip()
 
             except requests.RequestException as e:
                 logging.error(f"Error getting AI response (attempt {attempt + 1}): {str(e)}")
-
                 if attempt == retry_count - 1:
-                    # If all retry attempts fail, raise an error or return a default response
                     raise ValueError(f"Failed to get AI response after {retry_count} attempts: {str(e)}")
+
+        return None
 
     def update_chat(self, message):
         """Update the chat area with a new message."""

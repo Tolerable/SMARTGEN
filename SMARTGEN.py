@@ -179,19 +179,27 @@ class AIImageChatApp:
         )
         return refined_prompt
 
-    def get_enhancement_strategy(self, original_prompt):
+    def get_enhancement_strategy(self, original_prompt, style_index):
+        user_style = self.styles[style_index] if self.style_checkboxes[style_index] else ""
         strategy_prompt = (
-            f"Given this image concept: '{original_prompt}', "
-            "provide a brief strategy on how to enhance it visually. "
-            "Focus on specific visual elements, styles, or techniques that could be added or modified. "
-            "Keep your response concise, around 2-3 sentences."
+            f"Given this image concept: '{original_prompt}', and considering the style '{user_style}', "
+            "provide a brief strategy on how to enhance it visually in a single paragraph format. "
+            "Focus on specific visual elements, styles, or techniques that could be added or modified, "
+            f"with emphasis on the '{user_style}' if provided. "
+            "Keep your response concise, around 2-3 sentences confined to one paragraph."
         )
-        return self.get_ai_response(strategy_prompt)
+        response = self.get_ai_response(strategy_prompt)
+        return self.clean_paragraph(response)
 
     def clean_paragraph(self, text):
         """Ensure the AI response is formatted as a single paragraph."""
         # Replace multiple newlines with a single space
-        return re.sub(r'\s*\n\s*', ' ', text).strip()
+        cleaned = re.sub(r'\s*\n\s*', ' ', text).strip()
+        # Remove any remaining newlines
+        cleaned = cleaned.replace('\n', ' ')
+        # Remove multiple spaces
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        return cleaned
 
 
     def clean_prompt(self, prompt):
@@ -243,22 +251,24 @@ class AIImageChatApp:
             # Get AI response for chatting
             ai_response = self.get_ai_response(user_input)
             
-            # Update chat with AI's response
-            self.update_chat(f"AI: {ai_response}")
-
-            # Check if the response contains an image prompt
+            # Extract image prompt and clean the response
             cleaned_response, image_prompt = self.extract_image_prompt(ai_response)
+            cleaned_response = self.clean_paragraph(cleaned_response)
+
+            # Update chat with AI's cleaned response, preserving the "AI:" prefix
+            if cleaned_response.strip():
+                self.update_chat(f"AI: {cleaned_response}")
 
             if image_prompt:
-                self.update_chat("Generating images based on the prompt...")
+                self.update_chat("[GENERATING IMAGES]")
                 threading.Thread(target=self.image_enhancement_pipeline, args=(image_prompt,)).start()
 
-            # Update conversation history
-            self.update_history(user_input, ai_response)
+            # Update conversation history with cleaned response
+            self.update_history(user_input, cleaned_response)
 
         except Exception as e:
             logging.error(f"Error processing message: {str(e)}")
-            self.update_chat(f"Error processing your request. Please try again.")
+            self.update_chat("Error processing your request. Please try again.")
         
         self.update_status("")
 
@@ -281,7 +291,7 @@ class AIImageChatApp:
 
     def image_enhancement_pipeline(self, base_prompt):
         keywords = self.extract_keywords(base_prompt)
-        enhancement_strategy = self.get_ai_response(f"Given this image concept: '{base_prompt}', explain how you would enhance it visually.")
+        enhancement_strategy = self.get_enhancement_strategy(base_prompt, 0)  # Use 0 as default
         
         for i in range(4):
             if i == 0:
@@ -293,7 +303,9 @@ class AIImageChatApp:
                 )
             else:
                 previous_image_path = self.current_image_paths[i-1]
-                vision_analysis = self.analyze_image(previous_image_path)
+                vision_analysis = self.clean_paragraph(self.analyze_image(previous_image_path))
+                # Get a new enhancement strategy for each iteration
+                enhancement_strategy = self.get_enhancement_strategy(base_prompt, i)
                 enhanced_prompt = self.get_ai_response(
                     f"Original concept: '{base_prompt}'. "
                     f"Key elements: {', '.join(keywords)}. "
@@ -308,7 +320,14 @@ class AIImageChatApp:
             if not image_prompt:
                 image_prompt = base_prompt  # Fallback to original if extraction fails
 
-            # Generate image based on enhanced_prompt
+            # Append user style if checkbox is checked
+            if self.style_checkboxes[i] and self.styles[i]:
+                image_prompt += f". Apply a strong {self.styles[i]} to the entire image"
+
+            # Log the final prompt for debugging
+            logging.info(f"Final prompt for image {i+1}: {image_prompt}")
+
+            # Generate image based on enhanced_prompt with user style
             seed = random.randint(1, 1000000)
             selected_model = self.models[i] if self.style_checkboxes[i] else "flux"
             image_url = self.generate_image(image_prompt, seed=seed, model=selected_model)
@@ -325,7 +344,7 @@ class AIImageChatApp:
 
         self.update_chat("All images generated and analyzed.")
         self.cleanup_temp_files()
-        
+    
     def enhance_prompt(self, base_prompt):
         """Enhance the base prompt for better image generation."""
         enhanced_prompt = f"Enhanced version of: {base_prompt} with more vivid details."
@@ -544,30 +563,33 @@ class AIImageChatApp:
 
     def update_chat(self, message):
         """Update the chat area with a new message."""
-        # Remove colon at the end of the message if present
-        if message.strip().endswith(":"):
-            message = message.strip()[:-1] + "."
-
-        # Clean up the message, remove extra newlines or spaces
-        cleaned_message = message.strip()
+        # Remove leading/trailing whitespace
+        message = message.strip()
         
-        # Replace ellipses and colons with cleaner output
-        cleaned_message = cleaned_message.replace("...", "")
+        # Remove colon at the end of the message if present
+        if message.endswith(":"):
+            message = message[:-1] + "."
+        
+        # Replace ellipses with cleaner output
+        message = message.replace("...", "")
         
         # Reformat the image generation status
-        cleaned_message = cleaned_message.replace("Generating image based on your request", "[GENERATING IMAGES]")
-        cleaned_message = cleaned_message.replace("All images generated.", "[IMAGES GENERATED]")
+        message = message.replace("Generating image based on your request", "[GENERATING IMAGES]")
+        message = message.replace("All images generated.", "[IMAGES GENERATED]")
         
         # Remove any double newlines or excessive whitespace
-        cleaned_message = re.sub(r'\n\s*\n', '\n', cleaned_message).strip()
-
-        # Update chat area
-        self.chat_area.config(state=tk.NORMAL)
-        if cleaned_message:
-            self.chat_area.insert(tk.END, cleaned_message + "\n\n")
-        self.chat_area.see(tk.END)
-        self.chat_area.config(state=tk.DISABLED)
-        self.master.update_idletasks()
+        message = re.sub(r'\n\s*\n', '\n', message)
+        
+        # Remove any remaining leading/trailing whitespace
+        message = message.strip()
+        
+        # Only update chat if there's actual content
+        if message:
+            self.chat_area.config(state=tk.NORMAL)
+            self.chat_area.insert(tk.END, message + "\n\n")
+            self.chat_area.see(tk.END)
+            self.chat_area.config(state=tk.DISABLED)
+            self.master.update_idletasks()
 
     def update_status(self, status):
         """Update the status label to display the current status."""

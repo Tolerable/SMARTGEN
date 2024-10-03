@@ -10,6 +10,7 @@ import logging
 import random
 import base64
 import time
+import math
 import win32clipboard  # For clipboard copy
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -70,30 +71,28 @@ class AIImageChatApp:
         self.cleanup_temp_files()
         self.master.after(3600000, self.periodic_cleanup)  # Schedule next cleanup
         
-    def refine_prompt(self, base_prompt, enhanced_prompt, analysis):
-        """
-        Refine the prompt based on the user's original prompt, the AI's enhanced version, and the vision model's analysis.
-        Before saving and passing it to the next iteration, we clean out any redundant or repeating parts.
-        """
-        # Clean up the prompts and analysis
-        clean_base_prompt = self.clean_prompt(base_prompt)
-        clean_enhanced_prompt = self.clean_prompt(enhanced_prompt)
-        clean_analysis = self.clean_analysis(analysis)
-
-        # Construct the refined prompt
+    def refine_prompt(self, original_prompt, previous_attempt, analysis):
+        keywords = self.extract_keywords(original_prompt)
         refined_prompt = (
-            f"USER REQUESTED THIS IMAGE: '{clean_base_prompt}'; "
-            f"Your last attempt was done with this prompt: '{clean_enhanced_prompt}' "
-            f"and resulted in this image: '{clean_analysis}'. "
-            "Make sure the image includes all the elements requested, correcting any omissions or mistakes. "
-            "RESUBMIT WITH ![MRKDWN](NEW REVISED PROMPT) to improve this attempt!"
+            f"Original concept: '{original_prompt}'. "
+            f"Key elements: {', '.join(keywords)}. "
+            f"Previous attempt: '{previous_attempt}'. "
+            f"Current result: '{analysis}'. "
+            "Enhance the image while staying true to the original concept. "
+            "Feel free to creatively interpret and expand on the key elements, "
+            "but ensure the core idea remains intact. "
+            "GENERATE NEW PROMPT: ![MRKDWN](ENHANCED PROMPT FAITHFUL TO ORIGINAL CONCEPT)"
         )
-        
-        # Clean again in case of any metadata still present in the generated string
-        refined_prompt = self.clean_prompt(refined_prompt)
-        
-        logging.info(f"Refined prompt for next iteration: {refined_prompt}")
         return refined_prompt
+
+    def get_enhancement_strategy(self, original_prompt):
+        strategy_prompt = (
+            f"Given this image concept: '{original_prompt}', "
+            "explain in a few sentences how you would enhance it "
+            "while staying true to the original idea. Focus on visual improvements "
+            "and creative interpretations that amplify the concept's core elements."
+        )
+        return self.get_ai_response(strategy_prompt)
 
     def clean_prompt(self, prompt):
         """
@@ -137,23 +136,18 @@ class AIImageChatApp:
         return "break"
 
     def process_message(self, user_input):
-        self.update_status("Processing...")  # Keep this status update to inform about the process
+        self.update_status("Processing...")
         logging.info(f"Processing user input: {user_input}")
 
         try:
-            # Step 1: Get the AI's initial response
             ai_response = self.get_ai_response(user_input)
-            
-            # Step 2: Extract and clean the AI response, getting both the cleaned text and image prompt
             ai_response_cleaned, image_prompt = self.extract_image_prompt(ai_response)
 
-            # Step 3: Update chat with the cleaned response
             if ai_response_cleaned:
-                self.update_chat(ai_response_cleaned)  # Only show meaningful responses
+                self.update_chat(ai_response_cleaned)
 
-            # Step 4: If an image prompt exists, start the enhancement process
             if image_prompt:
-                self.update_chat("Generating image based on your request...")  # Keep it simple, concise
+                self.update_chat("Generating image based on your request...")
                 threading.Thread(target=self.image_enhancement_pipeline, args=(image_prompt,)).start()
 
         except Exception as e:
@@ -180,39 +174,40 @@ class AIImageChatApp:
         return cleaned_text, image_prompt
 
     def image_enhancement_pipeline(self, base_prompt):
-        """Main pipeline to generate and enhance images based on user input."""
+        keywords = self.extract_keywords(base_prompt)
+        enhancement_strategy = self.get_enhancement_strategy(base_prompt)
+        
+        previous_enhanced_prompt = base_prompt
+        previous_analysis = "No previous analysis"
+
         for i in range(4):
-            try:
-                # Step 1: Enhance the base prompt
-                if i == 0:
-                    enhanced_prompt = self.enhance_prompt(base_prompt)  # First enhancement
-                else:
-                    enhanced_prompt = self.refine_prompt(
-                        base_prompt, previous_enhanced_prompt, previous_analysis
-                    )  # Refining on subsequent iterations
+            if i == 0:
+                enhanced_prompt = (
+                    f"Original concept: '{base_prompt}'. "
+                    f"Key elements: {', '.join(keywords)}. "
+                    f"Enhancement strategy: {enhancement_strategy}. "
+                    "GENERATE NEW PROMPT: ![MRKDWN](ENHANCED PROMPT)"
+                )
+            else:
+                enhanced_prompt = self.refine_prompt(base_prompt, previous_enhanced_prompt, previous_analysis)
+            
+            # Generate image based on enhanced_prompt
+            seed = random.randint(1, 1000000)
+            image_url = self.generate_image(enhanced_prompt, seed=seed)
+            if not image_url:
+                self.update_chat(f"Failed to generate image for iteration {i+1}.")
+                continue
 
-                # Step 2: Generate the image with the enhanced prompt
-                image_url = self.generate_image(enhanced_prompt, seed=random.randint(1, 1000000))
-                if not image_url:
-                    self.update_chat(f"Failed to generate image for iteration {i+1}.")
-                    continue
+            # Save and display the generated image
+            image_path = self.save_image(image_url)
+            self.display_image(image_path, i)
 
-                # Step 3: Save the generated image locally
-                image_path = self.save_image(image_url)
+            # Analyze the generated image
+            analysis = self.analyze_image(image_path)
 
-                # Step 4: Analyze the generated image using the vision API
-                analysis = self.analyze_image(image_path)
-
-                # Step 5: Store the prompt and analysis for use in the next iteration
-                previous_enhanced_prompt = enhanced_prompt
-                previous_analysis = analysis
-
-                # Step 6: Display the generated image in the grid
-                self.display_image(image_path, i)
-
-            except Exception as e:
-                logging.error(f"Error in image enhancement pipeline: {str(e)}")
-                self.update_chat(f"Error during image generation in iteration {i+1}: {str(e)}")
+            # Update previous_enhanced_prompt and previous_analysis for the next iteration
+            previous_enhanced_prompt = enhanced_prompt
+            previous_analysis = analysis
 
         self.update_chat("All images generated.")
         self.cleanup_temp_files()
@@ -221,6 +216,10 @@ class AIImageChatApp:
         """Enhance the base prompt for better image generation."""
         enhanced_prompt = f"Enhanced version of: {base_prompt} with more vivid details."
         return enhanced_prompt
+
+    def extract_keywords(self, prompt):
+        common_words = set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'])
+        return [word.lower() for word in prompt.split() if word.lower() not in common_words]
 
     def generate_image(self, prompt, seed):
         """Call the image generation API with the enhanced prompt."""
@@ -241,6 +240,8 @@ class AIImageChatApp:
             path = f"temp_image_{int(time.time())}.png"
             img.save(path)
             self.current_image_paths.append(path)
+            # Keep only the last 4 image paths
+            self.current_image_paths = self.current_image_paths[-4:]
             return path
         except Exception as e:
             logging.error(f"Error saving image: {str(e)}")
@@ -338,6 +339,7 @@ class AIImageChatApp:
         self.image_grid_frame.update_idletasks()
 
     def copy_image_to_clipboard(self):
+        """Copy the selected image to the clipboard."""
         try:
             if hasattr(self, 'current_copied_image') and os.path.exists(self.current_copied_image):
                 img = Image.open(self.current_copied_image)
@@ -360,31 +362,29 @@ class AIImageChatApp:
     def copy_all_images_to_clipboard(self):
         """Combine all 4 images into one and copy it to the clipboard."""
         try:
-            if len(self.current_image_paths) == 4:
-                combined_image = Image.new('RGB', (500, 500))  # Create a blank 500x500 canvas
-                thumbnail_size = (250, 250)
+            if len(self.current_image_paths) != 4:
+                logging.error(f"Expected 4 images, but found {len(self.current_image_paths)}.")
+                return
 
-                # Place each image in the 2x2 grid within the combined image
-                for i, image_path in enumerate(self.current_image_paths):
-                    img = Image.open(image_path).resize(thumbnail_size, Image.LANCZOS)
-                    row = i // 2
-                    col = i % 2
-                    combined_image.paste(img, (col * 250, row * 250))  # Paste in the correct position
+            combined_image = Image.new('RGB', (500, 500))
+            for i, image_path in enumerate(self.current_image_paths):
+                img = Image.open(image_path)
+                img = img.resize((250, 250), Image.LANCZOS)
+                x = (i % 2) * 250
+                y = (i // 2) * 250
+                combined_image.paste(img, (x, y))
 
-                # Copy combined image to clipboard
-                output = io.BytesIO()
-                combined_image.convert('RGB').save(output, 'BMP')
-                data = output.getvalue()[14:]  # Remove BMP header
-                output.close()
+            output = io.BytesIO()
+            combined_image.save(output, 'BMP')
+            data = output.getvalue()[14:]  # Remove BMP header
+            output.close()
 
-                win32clipboard.OpenClipboard()
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
-                win32clipboard.CloseClipboard()
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+            win32clipboard.CloseClipboard()
 
-                logging.info("All images copied to clipboard as a single image.")
-            else:
-                logging.error("Not enough images to copy. Ensure 4 images are generated.")
+            logging.info("All 4 images copied to clipboard as a single image.")
         except Exception as e:
             logging.error(f"Error copying all images to clipboard: {str(e)}")
 

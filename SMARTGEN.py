@@ -12,6 +12,7 @@ import base64
 import time
 import math
 import win32clipboard 
+import json
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -62,11 +63,15 @@ class StyleEditor:
             return ["flux", "flux-realism", "flux-anime", "flux-3d", "any-dark", "turbo"]
     
     def save(self):
-        self.styles = [entry.get() for entry in self.entries]
-        self.checkboxes = [var.get() for var in self.checkbox_vars]
-        self.models = [var.get() for var in self.model_vars]
-        self.callback(self.styles, self.checkboxes, self.models)
-        logging.info("Styles and models saved successfully")
+        styles = [entry.get() for entry in self.entries]
+        checkboxes = [var.get() for var in self.checkbox_vars]
+        models = [var.get() for var in self.model_vars]
+        self.callback(styles, checkboxes, models)
+        logging.info(f"StyleEditor save: styles={styles}, checkboxes={checkboxes}, models={models}")
+
+    def on_closing(self):
+        self.save()
+        self.window.destroy()
     
     def revert(self):
         for entry, style in zip(self.entries, self.styles):
@@ -78,10 +83,6 @@ class StyleEditor:
             var.set(model)
         logging.info("Styles and models reverted to last saved state")
     
-    def on_closing(self):
-        self.save()
-        self.window.destroy()
-        
 class AIImageChatApp:
     def __init__(self, master):
         self.master = master
@@ -147,6 +148,9 @@ class AIImageChatApp:
         self.style_checkboxes = [False] * 4
         self.models = ["flux"] * 4
         
+        self.load_settings()
+        # print(f"Loaded settings: styles={self.styles}, checkboxes={self.style_checkboxes}, models={self.models}")
+        
     def open_style_editor(self):
         StyleEditor(self.master, self.update_styles, self.styles, self.style_checkboxes, self.models)
 
@@ -154,7 +158,8 @@ class AIImageChatApp:
         self.styles = styles
         self.style_checkboxes = checkboxes
         self.models = models
-        logging.info("Styles and models updated in main application")
+        self.save_settings()
+        logging.info(f"Styles and models updated and saved: styles={styles}, checkboxes={checkboxes}, models={models}")
         
     def periodic_cleanup(self):
         self.cleanup_temp_files()
@@ -177,11 +182,17 @@ class AIImageChatApp:
     def get_enhancement_strategy(self, original_prompt):
         strategy_prompt = (
             f"Given this image concept: '{original_prompt}', "
-            "explain in a few sentences how you would enhance it "
-            "while staying true to the original idea. Focus on visual improvements "
-            "and creative interpretations that amplify the concept's core elements."
+            "provide a brief strategy on how to enhance it visually. "
+            "Focus on specific visual elements, styles, or techniques that could be added or modified. "
+            "Keep your response concise, around 2-3 sentences."
         )
         return self.get_ai_response(strategy_prompt)
+
+    def clean_paragraph(self, text):
+        """Ensure the AI response is formatted as a single paragraph."""
+        # Replace multiple newlines with a single space
+        return re.sub(r'\s*\n\s*', ' ', text).strip()
+
 
     def clean_prompt(self, prompt):
         """
@@ -229,15 +240,21 @@ class AIImageChatApp:
         logging.info(f"Processing user input: {user_input}")
 
         try:
+            # Get AI response for chatting
             ai_response = self.get_ai_response(user_input)
-            ai_response_cleaned, image_prompt = self.extract_image_prompt(ai_response)
+            
+            # Update chat with AI's response
+            self.update_chat(f"AI: {ai_response}")
 
-            if ai_response_cleaned:
-                self.update_chat(ai_response_cleaned)
+            # Check if the response contains an image prompt
+            cleaned_response, image_prompt = self.extract_image_prompt(ai_response)
 
             if image_prompt:
-                self.update_chat("Generating image based on your request...")
+                self.update_chat("Generating images based on the prompt...")
                 threading.Thread(target=self.image_enhancement_pipeline, args=(image_prompt,)).start()
+
+            # Update conversation history
+            self.update_history(user_input, ai_response)
 
         except Exception as e:
             logging.error(f"Error processing message: {str(e)}")
@@ -247,16 +264,16 @@ class AIImageChatApp:
 
     def update_history(self, user_input, ai_response):
         """Updates the conversation history."""
-        self.conversation_history.append({"user": user_input, "ai": ai_response})
-        if len(self.conversation_history) > 5:
-            self.conversation_history.pop(0)
+        self.conversation_history.append({"role": "user", "content": user_input})
+        self.conversation_history.append({"role": "assistant", "content": ai_response})
+        
+        # Trim conversation history to the last 5 exchanges
+        if len(self.conversation_history) > 10:  # 5 exchanges = 10 messages (user + AI)
+            self.conversation_history = self.conversation_history[-10:]
+
         logging.info(f"Updated conversation history. Current length: {len(self.conversation_history)}")
 
     def extract_image_prompt(self, text):
-        """
-        Extract the image prompt from the AI response and clean the response text.
-        This will remove the markdown-style image prompt and return the cleaned text and the image prompt.
-        """
         match = re.search(r'!\[MRKDWN\]\((.*?)\)', text)
         image_prompt = match.group(1) if match else None
         cleaned_text = re.sub(r'!\[MRKDWN\]\(.*?\)', '', text).strip()
@@ -264,37 +281,49 @@ class AIImageChatApp:
 
     def image_enhancement_pipeline(self, base_prompt):
         keywords = self.extract_keywords(base_prompt)
-        enhancement_strategy = self.get_enhancement_strategy(base_prompt)
+        enhancement_strategy = self.get_ai_response(f"Given this image concept: '{base_prompt}', explain how you would enhance it visually.")
         
-        previous_enhanced_prompt = base_prompt
-        previous_analysis = "No previous analysis"
         for i in range(4):
             if i == 0:
-                enhanced_prompt = (
+                enhanced_prompt = self.get_ai_response(
                     f"Original concept: '{base_prompt}'. "
                     f"Key elements: {', '.join(keywords)}. "
                     f"Enhancement strategy: {enhancement_strategy}. "
                     "GENERATE NEW PROMPT: ![MRKDWN](ENHANCED PROMPT)"
                 )
             else:
-                enhanced_prompt = self.refine_prompt(base_prompt, previous_enhanced_prompt, previous_analysis)
+                previous_image_path = self.current_image_paths[i-1]
+                vision_analysis = self.analyze_image(previous_image_path)
+                enhanced_prompt = self.get_ai_response(
+                    f"Original concept: '{base_prompt}'. "
+                    f"Key elements: {', '.join(keywords)}. "
+                    f"Enhancement strategy: {enhancement_strategy}. "
+                    f"Previous attempt: {vision_analysis}. "
+                    "GENERATE NEW PROMPT: ![MRKDWN](REFINED PROMPT)"
+                )
+
+            # Extract the actual prompt from the AI response
+            _, image_prompt = self.extract_image_prompt(enhanced_prompt)
             
+            if not image_prompt:
+                image_prompt = base_prompt  # Fallback to original if extraction fails
+
             # Generate image based on enhanced_prompt
             seed = random.randint(1, 1000000)
             selected_model = self.models[i] if self.style_checkboxes[i] else "flux"
-            image_url = self.generate_image(enhanced_prompt, seed=seed, model=selected_model)
+            image_url = self.generate_image(image_prompt, seed=seed, model=selected_model)
             if not image_url:
                 self.update_chat(f"Failed to generate image for iteration {i+1}.")
                 continue
             # Save and display the generated image
             image_path = self.save_image(image_url)
             self.display_image(image_path, i)
+
             # Analyze the generated image
-            analysis = self.analyze_image(image_path)
-            # Update previous_enhanced_prompt and previous_analysis for the next iteration
-            previous_enhanced_prompt = enhanced_prompt
-            previous_analysis = analysis
-        self.update_chat("All images generated.")
+            vision_analysis = self.analyze_image(image_path)
+            self.update_chat(f"Image {i+1} generated and analyzed.")
+
+        self.update_chat("All images generated and analyzed.")
         self.cleanup_temp_files()
         
     def enhance_prompt(self, base_prompt):
@@ -480,31 +509,38 @@ class AIImageChatApp:
 
     def get_ai_response(self, prompt, retry_count=3):
         logging.info(f"Sending prompt to AI: {prompt}")
+        
+        # Include conversation history to maintain context
+        conversation = [{"role": "system", "content": self.system_message}]
+        conversation.extend(self.conversation_history)  # Add previous conversation history
+        conversation.append({"role": "user", "content": prompt})  # Add the new prompt
 
         for attempt in range(retry_count):
             try:
                 response = requests.post(
                     "https://text.pollinations.ai/",
                     json={
-                        "messages": [
-                            {"role": "system", "content": self.system_message},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "model": "openai",  # Make sure this is set correctly
+                        "messages": conversation,  # Pass the conversation to the API
+                        "model": "openai",
                         "seed": -1,
                         "jsonMode": False
                     },
                     timeout=60
                 )
                 response.raise_for_status()
-                return response.text.strip()
+                
+                if response.status_code == 200:
+                    return response.text.strip()
+                else:
+                    logging.error(f"Unexpected status code: {response.status_code}")
+                    return None
 
             except requests.RequestException as e:
                 logging.error(f"Error getting AI response (attempt {attempt + 1}): {str(e)}")
                 if attempt == retry_count - 1:
-                    raise ValueError(f"Failed to get AI response after {retry_count} attempts: {str(e)}")
+                    return f"I'm sorry, but I'm having trouble connecting to my language model right now. Let's proceed with image generation using your original prompt: {prompt}"
 
-        return None
+        return f"I apologize, but I'm unable to enhance the prompt at the moment. Let's use your original idea: {prompt}"
 
     def update_chat(self, message):
         """Update the chat area with a new message."""
@@ -538,12 +574,42 @@ class AIImageChatApp:
         self.status_label.config(text=status)
         logging.info(f"Status updated: {status}")
 
+    def save_settings(self):
+        settings = {
+            "styles": self.styles,
+            "style_checkboxes": self.style_checkboxes,
+            "models": self.models
+        }
+        with open("smartgen_settings.json", "w") as f:
+            json.dump(settings, f)
+        logging.info(f"Settings saved: {settings}")
+
+    def load_settings(self):
+        try:
+            with open("smartgen_settings.json", "r") as f:  # Changed from "settings.json" to "smartgen_settings.json"
+                settings = json.load(f)
+            self.styles = settings.get("styles", [""] * 4)
+            self.style_checkboxes = settings.get("style_checkboxes", [False] * 4)
+            self.models = settings.get("models", ["flux"] * 4)
+        except FileNotFoundError:
+            self.styles = [""] * 4
+            self.style_checkboxes = [False] * 4
+            self.models = ["flux"] * 4
+
+    def update_styles(self, styles, checkboxes, models):
+        self.styles = styles
+        self.style_checkboxes = checkboxes
+        self.models = models
+        self.save_settings()
+        logging.info("Styles and models updated and saved")
 
     def on_closing(self):
+        self.save_settings()
         self.cleanup_temp_files()
         self.master.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = AIImageChatApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()

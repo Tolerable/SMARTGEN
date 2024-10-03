@@ -94,10 +94,15 @@ class AIImageChatApp:
         self.menu_bar = Menu(master)
         self.master.config(menu=self.menu_bar)
 
+        self.nsfw_var = tk.BooleanVar(value=False)
+        self.on_top_var = tk.BooleanVar(value=False)
+
         # Create Tools menu
         self.tools_menu = Menu(self.menu_bar, tearoff=0)
         self.menu_bar.add_cascade(label="Tools", menu=self.tools_menu)
         self.tools_menu.add_command(label="Style Editor", command=self.open_style_editor)
+        self.tools_menu.add_checkbutton(label="NSFW", variable=self.nsfw_var, command=self.toggle_nsfw)
+        self.tools_menu.add_checkbutton(label="On Top", variable=self.on_top_var, command=self.toggle_on_top)
 
         self.main_frame = tk.Frame(master, padx=15, pady=15, bg='white')
         self.main_frame.pack(fill=tk.BOTH, expand=True)
@@ -136,8 +141,8 @@ class AIImageChatApp:
 
         # Right-click context menu for copying images
         self.image_menu = Menu(self.master, tearoff=0)
-        self.image_menu.add_command(label="Copy Image", command=self.copy_image_to_clipboard)
-        self.image_menu.add_command(label="Copy All", command=self.copy_all_images_to_clipboard)
+        self.image_menu.add_command(label="Copy ONE (1)", command=self.copy_image_to_clipboard)
+        self.image_menu.add_command(label="Copy ALL (4)", command=self.copy_all_images_to_clipboard)
         
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
         
@@ -150,7 +155,18 @@ class AIImageChatApp:
         
         self.load_settings()
         # print(f"Loaded settings: styles={self.styles}, checkboxes={self.style_checkboxes}, models={self.models}")
-        
+
+    def toggle_nsfw(self):
+        nsfw_state = "enabled" if self.nsfw_var.get() else "disabled"
+        logging.info(f"NSFW mode {nsfw_state}")
+        self.save_settings()
+
+    def toggle_on_top(self):
+        self.master.attributes("-topmost", self.on_top_var.get())
+        on_top_state = "enabled" if self.on_top_var.get() else "disabled"
+        logging.info(f"On Top mode {on_top_state}")
+        self.save_settings()
+
     def open_style_editor(self):
         StyleEditor(self.master, self.update_styles, self.styles, self.style_checkboxes, self.models)
 
@@ -261,6 +277,7 @@ class AIImageChatApp:
 
             if image_prompt:
                 self.update_chat("[GENERATING IMAGES]")
+                logging.info(f"Starting image generation thread for prompt: {image_prompt}")
                 threading.Thread(target=self.image_enhancement_pipeline, args=(image_prompt,)).start()
 
             # Update conversation history with cleaned response
@@ -290,60 +307,72 @@ class AIImageChatApp:
         return cleaned_text, image_prompt
 
     def image_enhancement_pipeline(self, base_prompt):
-        keywords = self.extract_keywords(base_prompt)
-        enhancement_strategy = self.get_enhancement_strategy(base_prompt, 0)  # Use 0 as default
-        
-        for i in range(4):
-            if i == 0:
-                enhanced_prompt = self.get_ai_response(
-                    f"Original concept: '{base_prompt}'. "
-                    f"Key elements: {', '.join(keywords)}. "
-                    f"Enhancement strategy: {enhancement_strategy}. "
-                    "GENERATE NEW PROMPT: ![MRKDWN](ENHANCED PROMPT)"
-                )
-            else:
-                previous_image_path = self.current_image_paths[i-1]
-                vision_analysis = self.clean_paragraph(self.analyze_image(previous_image_path))
-                # Get a new enhancement strategy for each iteration
-                enhancement_strategy = self.get_enhancement_strategy(base_prompt, i)
-                enhanced_prompt = self.get_ai_response(
-                    f"Original concept: '{base_prompt}'. "
-                    f"Key elements: {', '.join(keywords)}. "
-                    f"Enhancement strategy: {enhancement_strategy}. "
-                    f"Previous attempt: {vision_analysis}. "
-                    "GENERATE NEW PROMPT: ![MRKDWN](REFINED PROMPT)"
-                )
-
-            # Extract the actual prompt from the AI response
-            _, image_prompt = self.extract_image_prompt(enhanced_prompt)
+        try:
+            logging.info(f"Starting image enhancement pipeline for prompt: {base_prompt}")
+            keywords = self.extract_keywords(base_prompt)
+            enhancement_strategy = self.get_enhancement_strategy(base_prompt, 0)  # Use 0 as default
+            logging.info(f"Initial enhancement strategy: {enhancement_strategy}")
             
-            if not image_prompt:
-                image_prompt = base_prompt  # Fallback to original if extraction fails
+            for i in range(4):
+                logging.info(f"Processing image {i+1}")
+                if i == 0:
+                    enhanced_prompt = self.get_ai_response(
+                        f"Original concept: '{base_prompt}'. "
+                        f"Key elements: {', '.join(keywords)}. "
+                        f"Enhancement strategy: {enhancement_strategy}. "
+                        "GENERATE NEW PROMPT: ![MRKDWN](ENHANCED PROMPT)"
+                    )
+                else:
+                    previous_image_path = self.current_image_paths[i-1]
+                    vision_analysis = self.clean_paragraph(self.analyze_image(previous_image_path))
+                    # Get a new enhancement strategy for each iteration
+                    enhancement_strategy = self.get_enhancement_strategy(base_prompt, i)
+                    enhanced_prompt = self.get_ai_response(
+                        f"Original concept: '{base_prompt}'. "
+                        f"Key elements: {', '.join(keywords)}. "
+                        f"Enhancement strategy: {enhancement_strategy}. "
+                        f"Previous attempt: {vision_analysis}. "
+                        "GENERATE NEW PROMPT: ![MRKDWN](REFINED PROMPT)"
+                    )
 
-            # Append user style if checkbox is checked
-            if self.style_checkboxes[i] and self.styles[i]:
-                image_prompt += f". Apply a strong {self.styles[i]} to the entire image"
+                # Extract the actual prompt from the AI response
+                _, image_prompt = self.extract_image_prompt(enhanced_prompt)
+                
+                if not image_prompt:
+                    image_prompt = base_prompt  # Fallback to original if extraction fails
 
-            # Log the final prompt for debugging
-            logging.info(f"Final prompt for image {i+1}: {image_prompt}")
+                # Append user style if checkbox is checked
+                if self.style_checkboxes[i] and self.styles[i]:
+                    image_prompt += f". Apply a strong {self.styles[i]} to the entire image"
 
-            # Generate image based on enhanced_prompt with user style
-            seed = random.randint(1, 1000000)
-            selected_model = self.models[i] if self.style_checkboxes[i] else "flux"
-            image_url = self.generate_image(image_prompt, seed=seed, model=selected_model)
-            if not image_url:
-                self.update_chat(f"Failed to generate image for iteration {i+1}.")
-                continue
-            # Save and display the generated image
-            image_path = self.save_image(image_url)
-            self.display_image(image_path, i)
+                # Log the final prompt for debugging
+                logging.info(f"Final prompt for image {i+1}: {image_prompt}")
 
-            # Analyze the generated image
-            vision_analysis = self.analyze_image(image_path)
-            self.update_chat(f"Image {i+1} generated and analyzed.")
+                # Generate image based on enhanced_prompt with user style
+                seed = random.randint(1, 1000000)
+                selected_model = self.models[i] if self.style_checkboxes[i] else "flux"
+                logging.info(f"Generating image {i+1}")
+                image_url = self.generate_image(image_prompt, seed=seed, model=selected_model)
+                if not image_url:
+                    self.update_chat(f"Failed to generate image for iteration {i+1}.")
+                    logging.error(f"Failed to generate image for iteration {i+1}")
+                    continue
+                logging.info(f"Image {i+1} generated successfully")
+                
+                # Save and display the generated image
+                image_path = self.save_image(image_url)
+                self.display_image(image_path, i)
 
-        self.update_chat("All images generated and analyzed.")
-        self.cleanup_temp_files()
+                # Analyze the generated image
+                vision_analysis = self.analyze_image(image_path)
+                self.update_chat(f"Image {i+1} generated and analyzed.")
+
+            logging.info("Image enhancement pipeline completed")
+            self.update_chat("All images generated and analyzed.")
+            self.cleanup_temp_files()
+        except Exception as e:
+            logging.error(f"Error in image enhancement pipeline: {str(e)}", exc_info=True)
+            self.update_chat("An error occurred while generating images. Please try again.")
     
     def enhance_prompt(self, base_prompt):
         """Enhance the base prompt for better image generation."""
@@ -397,7 +426,9 @@ class AIImageChatApp:
             with open(image_path, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
-            prompt = "In a single English paragraph, describe the image exactly as you see it, including colors, genders, and any notable details."
+            nsfw_check = "If nudity is detected include NUDITY with response." if self.nsfw_var.get() else ""
+            prompt = f"In a single English paragraph, describe the image exactly as you see it, including colors, genders, and any notable details. {nsfw_check}"
+            
             analysis_response = requests.post(
                 "https://text.pollinations.ai/",
                 json={
@@ -600,7 +631,9 @@ class AIImageChatApp:
         settings = {
             "styles": self.styles,
             "style_checkboxes": self.style_checkboxes,
-            "models": self.models
+            "models": self.models,
+            "nsfw": self.nsfw_var.get(),
+            "on_top": self.on_top_var.get()
         }
         with open("smartgen_settings.json", "w") as f:
             json.dump(settings, f)
@@ -608,11 +641,14 @@ class AIImageChatApp:
 
     def load_settings(self):
         try:
-            with open("smartgen_settings.json", "r") as f:  # Changed from "settings.json" to "smartgen_settings.json"
+            with open("smartgen_settings.json", "r") as f:
                 settings = json.load(f)
             self.styles = settings.get("styles", [""] * 4)
             self.style_checkboxes = settings.get("style_checkboxes", [False] * 4)
             self.models = settings.get("models", ["flux"] * 4)
+            self.nsfw_var.set(settings.get("nsfw", False))
+            self.on_top_var.set(settings.get("on_top", False))
+            self.toggle_on_top()  # Apply the on_top setting
         except FileNotFoundError:
             self.styles = [""] * 4
             self.style_checkboxes = [False] * 4

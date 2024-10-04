@@ -361,7 +361,7 @@ class AIImageChatApp:
                 
                 # Save and display the generated image
                 image_path = self.save_image(image_url)
-                self.display_image(image_path, i)
+                self.display_image(image_path, i, image_prompt)
 
                 # Analyze the generated image
                 vision_analysis = self.analyze_image(image_path)
@@ -453,7 +453,7 @@ class AIImageChatApp:
             logging.error(f"Error analyzing image: {str(e)}")
             return "Error analyzing image."
 
-    def display_image(self, image_path, index):
+    def display_image(self, image_path, index, original_prompt):
         img = Image.open(image_path)
         thumbnail = img.copy().resize((250, 250), Image.LANCZOS)
         photo = ImageTk.PhotoImage(thumbnail)
@@ -462,8 +462,10 @@ class AIImageChatApp:
         label.photo = photo
         label.original_image = img
         label.image_path = image_path
+        label.original_prompt = original_prompt
         label.bind("<Button-3>", self.show_image_context_menu)
-
+        logging.info(f"Image displayed at index {index} with prompt: {original_prompt}")
+        
     def toggle_image_size(self, event, label):
         frame_width = 500
         frame_height = 500
@@ -488,9 +490,10 @@ class AIImageChatApp:
                 full_label.photo = photo_full
                 full_label.original_image = label.original_image
                 full_label.image_path = label.image_path
+                full_label.original_prompt = label.original_prompt  # Ensure this attribute is copied
                 full_label.grid(row=0, column=0, columnspan=2, rowspan=2, sticky="nsew")
                 full_label.bind("<Button-1>", lambda e, lbl=full_label: self.toggle_image_size(e, lbl))
-                full_label.bind("<Button-3>", self.show_image_context_menu)  # Corrected this line
+                full_label.bind("<Button-3>", self.show_image_context_menu)  # Bind right-click to full-size image
                 
                 # Hide other images but keep them in the grid
                 for widget in self.image_grid_frame.winfo_children():
@@ -525,17 +528,16 @@ class AIImageChatApp:
     def copy_all_images_to_clipboard(self):
         """Combine all 4 images into one and copy it to the clipboard."""
         try:
-            if len(self.current_image_paths) != 4:
-                logging.error(f"Expected 4 images, but found {len(self.current_image_paths)}.")
-                return
-
             combined_image = Image.new('RGB', (500, 500))
-            for i, image_path in enumerate(self.current_image_paths):
-                img = Image.open(image_path)
-                img = img.resize((250, 250), Image.LANCZOS)
-                x = (i % 2) * 250
-                y = (i // 2) * 250
-                combined_image.paste(img, (x, y))
+            for i, label in enumerate(self.image_placeholders):
+                if hasattr(label, 'image_path') and os.path.exists(label.image_path):
+                    img = Image.open(label.image_path)
+                    img = img.resize((250, 250), Image.LANCZOS)
+                    x = (i % 2) * 250
+                    y = (i // 2) * 250
+                    combined_image.paste(img, (x, y))
+                else:
+                    logging.warning(f"Image not found for placeholder {i}")
 
             output = io.BytesIO()
             combined_image.save(output, 'BMP')
@@ -555,7 +557,76 @@ class AIImageChatApp:
         label = event.widget
         if hasattr(label, 'image_path'):
             self.current_copied_image = label.image_path
+            self.image_menu.delete(0, tk.END)  # Clear existing menu items
+            self.image_menu.add_command(label="Copy ONE (1)", command=self.copy_image_to_clipboard)
+            self.image_menu.add_command(label="Copy ALL (4)", command=self.copy_all_images_to_clipboard)
+            self.image_menu.add_command(label="Enhance", command=lambda: self.enhance_single_image(label))
             self.image_menu.tk_popup(event.x_root, event.y_root)
+        self.image_menu.grab_release()  # Release grab after menu is shown
+
+    def enhance_single_image(self, label):
+        threading.Thread(target=self._enhance_single_image_thread, args=(label,)).start()
+
+    def _enhance_single_image_thread(self, label):
+        # Move the entire content of the current enhance_single_image method here
+        logging.info("Enhance single image function called")
+        if not hasattr(label, 'image_path') or not hasattr(label, 'original_prompt'):
+            logging.error("Cannot enhance image. Original information is missing.")
+            self.update_chat("Cannot enhance this image. Original information is missing.")
+            return
+
+        try:
+            image_index = self.image_placeholders.index(label)
+            original_prompt = label.original_prompt
+            logging.info(f"Enhancing image {image_index + 1} with original prompt: {original_prompt}")
+
+            previous_analysis = self.analyze_image(label.image_path)
+            logging.info(f"Previous image analysis: {previous_analysis}")
+
+            self.update_chat(f"Enhancing image {image_index + 1}...")
+
+            enhanced_prompt = self.get_ai_response(
+                f"Original concept: '{original_prompt}'. "
+                f"Previous attempt: {previous_analysis}. "
+                "Enhance this image further while staying true to the original concept. "
+                "GENERATE NEW PROMPT: ![MRKDWN](ENHANCED PROMPT)"
+            )
+            logging.info(f"Enhanced prompt received: {enhanced_prompt}")
+
+            _, image_prompt = self.extract_image_prompt(enhanced_prompt)
+            if not image_prompt:
+                logging.warning("No image prompt extracted, using original prompt")
+                image_prompt = original_prompt
+
+            # Append user style if checkbox is checked
+            if self.style_checkboxes[image_index] and self.styles[image_index]:
+                image_prompt += f". Apply a strong {self.styles[image_index]} to the entire image"
+
+            logging.info(f"Final prompt for image {image_index + 1}: {image_prompt}")
+
+            seed = random.randint(1, 1000000)
+            selected_model = self.models[image_index] if self.style_checkboxes[image_index] else "flux"
+            logging.info(f"Generating image with seed: {seed} and model: {selected_model}")
+
+            image_url = self.generate_image(image_prompt, seed=seed, model=selected_model)
+
+            if not image_url:
+                logging.error(f"Failed to generate image for enhancement {image_index + 1}")
+                self.update_chat(f"Failed to enhance image {image_index + 1}.")
+                return
+
+            new_image_path = self.save_image(image_url)
+            logging.info(f"New image saved at: {new_image_path}")
+
+            self.display_image(new_image_path, image_index, image_prompt)
+            self.current_image_paths[image_index] = new_image_path
+
+            self.update_chat(f"Image {image_index + 1} enhanced and updated.")
+            logging.info(f"Image {image_index + 1} successfully enhanced and updated")
+
+        except Exception as e:
+            logging.error(f"Error in enhance_single_image: {str(e)}", exc_info=True)
+            self.update_chat(f"An error occurred while enhancing the image: {str(e)}")
 
     def get_ai_response(self, prompt, retry_count=3):
         logging.info(f"Sending prompt to AI: {prompt}")
